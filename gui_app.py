@@ -152,6 +152,19 @@ QUALITY_PRESETS = {
     ],
 }
 
+DEFAULT_TEMPLATES = [
+    'VK_{n:03d}_custom',
+    'modified_{original}',
+    '{artist} - {title}',
+    '{title}',
+    '{original}',
+    '{n:03d} - {artist} - {title}',
+    '{artist} - {album} - {n:02d} - {title}',
+    '{year} - {artist} - {title}',
+    '[VK] {title}',
+    '{title} (modified)',
+]
+
 
 class BatchConverter:
     def __init__(self, files, output_dir, output_format, quality_preset, 
@@ -350,6 +363,7 @@ class VKModifierApp:
         self._waveform_loading = False
         self._preview_timer = None
         self._mode = 'modifier'
+        self.user_templates = []
 
         self._load_config()
         self._create_vars()
@@ -453,6 +467,8 @@ class VKModifierApp:
         self.v_preset_name = tk.StringVar()
         self.v_max_workers = tk.IntVar(value=4)
         self.v_thread_delay = tk.DoubleVar(value=0.0)
+        self.v_new_template_name = tk.StringVar()
+        self.v_new_template_pattern = tk.StringVar()
         
         self.v_conv_format = tk.StringVar(value='mp3')
         self.v_conv_quality = tk.StringVar(value='320 kbps (CBR)')
@@ -537,11 +553,15 @@ class VKModifierApp:
         self.modifier_frame.pack(fill='both', expand=True)
 
     def _build_modifier_interface(self):
-        canvas = tk.Canvas(self.modifier_frame, borderwidth=0, highlightthickness=0)
-        vsb = ttk.Scrollbar(self.modifier_frame, orient='vertical', command=canvas.yview)
+        main_container = ttk.Frame(self.modifier_frame)
+        main_container.pack(fill='both', expand=True)
+        
+        canvas = tk.Canvas(main_container, borderwidth=0, highlightthickness=0)
+        vsb = ttk.Scrollbar(main_container, orient='vertical', command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side='right', fill='y')
+        
         canvas.pack(side='left', fill='both', expand=True)
+        vsb.pack(side='right', fill='y')
 
         self._scroll_frame = ttk.Frame(canvas)
         fid = canvas.create_window((0, 0), window=self._scroll_frame, anchor='nw')
@@ -555,7 +575,14 @@ class VKModifierApp:
 
         self._scroll_frame.bind('<Configure>', _on_frame_cfg)
         canvas.bind('<Configure>', _on_canvas_cfg)
-        canvas.bind_all('<MouseWheel>', _on_wheel)
+        
+        def _bind_wheel(event):
+            canvas.bind_all('<MouseWheel>', _on_wheel)
+        def _unbind_wheel(event):
+            canvas.unbind_all('<MouseWheel>')
+        
+        canvas.bind('<Enter>', _bind_wheel)
+        canvas.bind('<Leave>', _unbind_wheel)
 
         f = self._scroll_frame
         p = dict(padx=6, pady=4)
@@ -568,7 +595,7 @@ class VKModifierApp:
 
         self._build_waveform_section(f)
         self._build_preset_buttons(f)
-        self._build_methods_notebook(f)
+        self._build_methods_notebook()
 
         self.lbl_conflict = ttk.Label(f, text="", foreground='red', wraplength=800, justify='left')
         self.lbl_conflict.pack(fill='x', padx=6)
@@ -841,80 +868,94 @@ Lossless форматы (без потерь):
         ttk.Button(btn_row, text="Очистить",                command=self._clear_meta).pack(side='left', padx=2)
 
         r = len(fields) + 1
-        dec_row = ttk.Frame(lf)
-        dec_row.grid(row=r, column=0, columnspan=2, sticky='ew', pady=(4, 0))
-        ttk.Checkbutton(dec_row, text="Добавить текст:", variable=self.v_reupload,
-                        command=self._update_name_preview).pack(side='left')
-        ttk.Entry(dec_row, textvariable=self.v_reupload_text, width=14).pack(side='left', padx=2)
-        ttk.Radiobutton(dec_row, text="До", variable=self.v_reupload_pos,
-                        value='before', command=self._update_name_preview).pack(side='left')
-        ttk.Radiobutton(dec_row, text="После", variable=self.v_reupload_pos,
-                        value='after', command=self._update_name_preview).pack(side='left')
-        self.v_reupload_text.trace_add('write', lambda *_: self._update_name_preview())
-
-        r += 1
-        self.lbl_title_preview = ttk.Label(lf, text="Предпросмотр: —",
+        self.lbl_title_preview = ttk.Label(lf, text="Предпросмотр: --",
                                            foreground='#888', font=('', 8))
         self.lbl_title_preview.grid(row=r, column=0, columnspan=2, sticky='w', pady=(2, 0))
 
     def _update_name_preview(self):
-        import re as _re
-
-        title  = self.v_title.get()
+        title_raw = self.v_title.get()
         artist = self.v_artist.get()
-        album  = self.v_album.get()
-        year   = self.v_year.get()
-
-        display = title or (artist and f"{artist} - {title}") or "Название"
-        if artist and title:
-            display = f"{artist} - {title}"
-        elif title:
-            display = title
-        else:
-            display = "(нет названия)"
-
+        album = self.v_album.get()
+        year = self.v_year.get()
+        
+        title_with_reupload = title_raw
         if self.v_reupload.get():
             text = self.v_reupload_text.get()
-            if self.v_reupload_pos.get() == 'before':
-                display = f"{text} {display}"
+            pos = self.v_reupload_pos.get()
+            if title_raw:
+                if pos == 'before':
+                    title_with_reupload = f"{text} {title_raw}"
+                else:
+                    title_with_reupload = f"{title_raw} {text}"
             else:
-                display = f"{display} {text}"
-
+                title_with_reupload = text
+        
+        display_title = title_with_reupload if title_with_reupload else "(нет названия)"
+        
+        reupload_info = ""
+        if self.v_reupload.get():
+            reupload_info = f"\n   + REUPLOAD текст '{self.v_reupload_text.get()}' добавлен в {{title}}"
+        
         try:
-            self.lbl_title_preview.config(text=f"Предпросмотр: {display}")
+            self.status_reupload.config(text=f"Title после обработки: {display_title}{reupload_info}")
         except AttributeError:
             pass
-
-        def _safe(s):
-            return _re.sub(r'[\\/*?:"<>|]', '_', s).strip() or '_'
-
+        
         tpl = self.v_filename_template.get() or 'VK_{n:03d}_custom'
-
+        
         if self.current_index >= 0 and self.current_index < len(self.tracks_info):
             ti = self.tracks_info[self.current_index]
             orig = os.path.splitext(os.path.basename(self.input_files[self.current_index]))[0]
-            ex_title  = title or ti.title or orig
+            ex_title = title_with_reupload or ti.title or orig
             ex_artist = artist or ti.artist or ''
-            ex_album  = album or ti.album or ''
-            ex_year   = year or ti.year or ''
+            ex_album = album or ti.album or ''
+            ex_year = year or ti.year or ''
         else:
             orig = 'example_track'
-            ex_title  = title or 'Название'
-            ex_artist = artist or 'Исполнитель'
-            ex_album  = album or ''
-            ex_year   = year or ''
-
+            ex_title = title_with_reupload or 'Example Song'
+            ex_artist = artist or 'Example Artist'
+            ex_album = album or 'Example Album'
+            ex_year = year or '2024'
+        
         try:
-            fname = tpl.format(
-                n=1, original=_safe(orig),
-                title=_safe(ex_title), artist=_safe(ex_artist),
-                album=_safe(ex_album), year=_safe(ex_year),
+            fname_simple = tpl.format(
+                n=1,
+                original=self._safe_filename(orig),
+                title=self._safe_filename(ex_title),
+                artist=self._safe_filename(ex_artist),
+                album=self._safe_filename(ex_album),
+                year=self._safe_filename(str(ex_year)),
             ) + '.mp3'
+            
+            fname_padded = tpl.format(
+                n=42,
+                original=self._safe_filename(orig),
+                title=self._safe_filename(ex_title),
+                artist=self._safe_filename(ex_artist),
+                album=self._safe_filename(ex_album),
+                year=self._safe_filename(str(ex_year)),
+            ) + '.mp3'
+            
+            preview_text = f"Пример при n=1:  {fname_simple}\n"
+            preview_text += f"Пример при n=42: {fname_padded}"
+            
+            if self.v_reupload.get():
+                if '{title}' not in tpl:
+                    preview_text += f"\n\nВНИМАНИЕ: В шаблоне НЕТ {{title}}, поэтому текст '{self.v_reupload_text.get()}' НЕ попадёт в имя файла!"
+                else:
+                    preview_text += f"\n\nOK: Текст '{self.v_reupload_text.get()}' будет добавлен в имя файла через {{title}}"
+                    
         except (KeyError, ValueError) as e:
-            fname = f"ERROR: {e}"
+            preview_text = f"ОШИБКА в шаблоне: {e}\n"
+            preview_text += "Допустимые переменные: {n}, {n:03d}, {original}, {title}, {artist}, {album}, {year}"
 
         try:
-            self.lbl_file_preview.config(text=f"Предпросмотр: {fname}")
+            self.lbl_title_preview.config(text=f"Предпросмотр: {display_title}")
+        except AttributeError:
+            pass
+
+        try:
+            self.lbl_file_preview.config(text=preview_text)
         except AttributeError:
             pass
 
@@ -951,16 +992,20 @@ Lossless форматы (без потерь):
         self.preset_listbox.selection_set(index)
         self._load_selected_preset()
 
-    def _build_methods_notebook(self, parent):
-        nb = ttk.Notebook(parent)
-        nb.pack(fill='x', padx=6, pady=4)
-
+    def _build_methods_notebook(self, nb_parent=None):
+        if nb_parent is None:
+            nb = ttk.Notebook(self._scroll_frame)
+            nb.pack(fill='x', padx=6, pady=4)
+        else:
+            nb = nb_parent
+        
         self._build_basic_tab(nb)
         self._build_spectral_tab(nb)
         self._build_texture_tab(nb)
         self._build_advanced_tab(nb)
         self._build_technical_tab(nb)
         self._build_system_tab(nb)
+        self._build_filename_templates_tab(nb)
 
         for v in (
             self.v_fade, self.v_fade_val,
@@ -986,21 +1031,275 @@ Lossless форматы (без потерь):
         ):
             v.trace_add('write', lambda *a: self._schedule_preview_update())
 
-    def _method_row(self, parent, row, text, var, *extra_widgets):
-        cb = ttk.Checkbutton(parent, text=text, variable=var, command=self._check_conflicts)
-        cb.grid(row=row, column=0, sticky='w', padx=4, pady=2)
-        for col, w in enumerate(extra_widgets, start=1):
-            w.grid(row=row, column=col, padx=4, pady=2, sticky='w')
-        return cb
+    def _build_filename_templates_tab(self, nb):
+        f = ttk.Frame(nb, padding=8)
+        nb.add(f, text="Имена")
+        
+        # ---------- Выбор активного шаблона ----------
+        top_frame = ttk.LabelFrame(f, text="Активный шаблон", padding=6)
+        top_frame.pack(fill='x', pady=(0, 6))
+        
+        sel_row = ttk.Frame(top_frame)
+        sel_row.pack(fill='x')
+        ttk.Label(sel_row, text="Текущий:", font=('', 9, 'bold')).pack(side='left', padx=(0, 6))
+        
+        self.cmb_template = ttk.Combobox(sel_row, textvariable=self.v_filename_template,
+                                         width=45, state='readonly')
+        self.cmb_template.pack(side='left', padx=(0, 6))
+        self.cmb_template.bind('<<ComboboxSelected>>', lambda e: self._update_name_preview())
+        
+        ttk.Button(sel_row, text="Помощь по шаблонам", 
+                   command=self._show_template_help).pack(side='left')
+        
+        preview_frame = ttk.Frame(top_frame, relief='sunken', borderwidth=1)
+        preview_frame.pack(fill='x', pady=(6, 0))
+        self.lbl_file_preview = ttk.Label(preview_frame, text="Предпросмотр: --",
+                                          foreground='#333', font=('Consolas', 9),
+                                          padding=6, anchor='w', justify='left')
+        self.lbl_file_preview.pack(fill='x')
+        
+        # ---------- REUPLOAD текст ----------
+        reupload_frame = ttk.LabelFrame(f, text="Текст REUPLOAD (добавляется в {title})", padding=6)
+        reupload_frame.pack(fill='x', pady=(6, 6))
+        
+        reupload_row = ttk.Frame(reupload_frame)
+        reupload_row.pack(fill='x')
+        
+        ttk.Checkbutton(reupload_row, text="Добавить текст:", variable=self.v_reupload,
+                        command=self._update_name_preview).pack(side='left')
+        self.entry_reupload_text = ttk.Entry(reupload_row, textvariable=self.v_reupload_text, width=20)
+        self.entry_reupload_text.pack(side='left', padx=4)
+        ttk.Radiobutton(reupload_row, text="До названия", variable=self.v_reupload_pos,
+                        value='before', command=self._update_name_preview).pack(side='left', padx=2)
+        ttk.Radiobutton(reupload_row, text="После названия", variable=self.v_reupload_pos,
+                        value='after', command=self._update_name_preview).pack(side='left', padx=2)
+        
+        self.status_reupload = ttk.Label(reupload_frame, text="Title без изменений", 
+                                          foreground='#666', font=('', 8))
+        self.status_reupload.pack(anchor='w', pady=(4, 0))
+        
+        self.v_reupload_text.trace_add('write', lambda *_: self._update_name_preview())
+        
+        # ---------- Список шаблонов и конструктор ----------
+        mid_frame = ttk.Frame(f)
+        mid_frame.pack(fill='both', expand=True, pady=6)
+        
+        list_frame = ttk.LabelFrame(mid_frame, text="Сохранённые шаблоны", padding=4)
+        list_frame.pack(side='left', fill='both', expand=True, padx=(0, 4))
+        
+        sb_tpl = ttk.Scrollbar(list_frame, orient='vertical')
+        self.template_listbox = tk.Listbox(list_frame, yscrollcommand=sb_tpl.set,
+                                           height=8, exportselection=False,
+                                           selectbackground='#6366f1', selectforeground='white')
+        sb_tpl.config(command=self.template_listbox.yview)
+        sb_tpl.pack(side='right', fill='y')
+        self.template_listbox.pack(side='left', fill='both', expand=True)
+        self.template_listbox.bind('<<ListboxSelect>>', self._on_template_select)
+        self.template_listbox.bind('<Double-Button-1>', lambda e: self._use_selected_template())
+        
+        tpl_btns = ttk.Frame(list_frame)
+        tpl_btns.pack(fill='x', pady=(4, 0))
+        ttk.Button(tpl_btns, text="Использовать", command=self._use_selected_template).pack(side='left', padx=2)
+        ttk.Button(tpl_btns, text="Удалить", command=self._delete_selected_template).pack(side='left', padx=2)
+        
+        constr_frame = ttk.LabelFrame(mid_frame, text="Конструктор шаблона", padding=6)
+        constr_frame.pack(side='right', fill='both', expand=True)
+        
+        ttk.Label(constr_frame, text="Шаблон:", font=('', 9, 'bold')).pack(anchor='w')
+        self.entry_template_pattern = ttk.Entry(constr_frame, textvariable=self.v_new_template_pattern,
+                                                font=('Consolas', 10), width=35)
+        self.entry_template_pattern.pack(fill='x', pady=(2, 4))
+        self.v_new_template_pattern.trace_add('write', lambda *_: self._live_preview_template())
+        
+        vars_label = ttk.Label(constr_frame, text="Быстрая вставка переменных:", 
+                               font=('', 8, 'bold'), foreground='#666')
+        vars_label.pack(anchor='w', pady=(0, 2))
+        
+        vars_frame = ttk.Frame(constr_frame)
+        vars_frame.pack(fill='x', pady=(0, 4))
+        
+        variables = [
+            ('{n}', 'Номер'),
+            ('{n:03d}', 'Номер 001'),
+            ('{original}', 'Ориг. имя'),
+            ('{title}', 'Название'),
+            ('{artist}', 'Артист'),
+            ('{album}', 'Альбом'),
+            ('{year}', 'Год'),
+        ]
+        
+        for i, (var_text, var_desc) in enumerate(variables):
+            btn = ttk.Button(vars_frame, text=var_text, width=10,
+                            command=lambda vt=var_text: self._insert_template_var(vt))
+            btn.grid(row=i // 4, column=i % 4, padx=2, pady=2, sticky='ew')
+        
+        preview_live_frame = ttk.Frame(constr_frame, relief='sunken', borderwidth=1)
+        preview_live_frame.pack(fill='x', pady=(8, 4))
+        self.lbl_template_live_preview = ttk.Label(preview_live_frame, 
+                                                    text="Предпросмотр: --",
+                                                    foreground='#333', font=('Consolas', 9),
+                                                    padding=4, anchor='w', justify='left')
+        self.lbl_template_live_preview.pack(fill='x')
+        
+        save_frame = ttk.Frame(constr_frame)
+        save_frame.pack(fill='x')
+        ttk.Label(save_frame, text="Имя шаблона:").pack(side='left', padx=(0, 4))
+        self.entry_template_name = ttk.Entry(save_frame, textvariable=self.v_new_template_name, width=20)
+        self.entry_template_name.pack(side='left', padx=(0, 4))
+        ttk.Button(save_frame, text="Сохранить шаблон", 
+                   command=self._save_user_template).pack(side='left')
+        
+        info_frame = ttk.LabelFrame(f, text="Справка", padding=4)
+        info_frame.pack(fill='x')
+        info_text = (
+            "Доступные переменные: {n}  {n:03d}  {original}  {title}  {artist}  {album}  {year}\n"
+            "- {title} автоматически включает текст REUPLOAD (если включён)\n"
+            "- Недопустимые символы \\/:*?\"<>| заменяются на _\n"
+            "- Двойной клик по шаблону в списке -- сделать активным\n"
+            "- Ctrl+C/V/X/A работают во всех текстовых полях"
+        )
+        ttk.Label(info_frame, text=info_text, foreground='#888', 
+                  font=('', 7), justify='left').pack(anchor='w')
+        
+        self._refresh_template_list()
+        
+        self.v_filename_template.trace_add('write', lambda *_: self._update_name_preview())
+        self.v_reupload_text.trace_add('write', lambda *_: self._update_name_preview())
+        self.v_reupload_pos.trace_add('write', lambda *_: self._update_name_preview())
 
-    def _spin(self, parent, var, from_, to, inc, width=8, fmt='%.2f'):
-        sb = ttk.Spinbox(parent, textvariable=var, from_=from_, to=to,
-                         increment=inc, width=width, format=fmt if isinstance(var, tk.DoubleVar) else None)
-        return sb
+    def _insert_template_var(self, var_text):
+        try:
+            pos = self.entry_template_pattern.index('insert')
+            current = self.v_new_template_pattern.get()
+            new_text = current[:pos] + var_text + current[pos:]
+            self.v_new_template_pattern.set(new_text)
+            self.entry_template_pattern.icursor(pos + len(var_text))
+            self.entry_template_pattern.focus_set()
+        except Exception:
+            pass
 
-    def _desc(self, parent, row, col, text, colspan=4):
-        ttk.Label(parent, text=text, foreground='gray', font=('', 8, 'italic')
-                  ).grid(row=row, column=col, columnspan=colspan, sticky='w', padx=22, pady=(0, 3))
+    def _live_preview_template(self):
+        tpl = self.v_new_template_pattern.get()
+        if not tpl.strip():
+            self.lbl_template_live_preview.config(text="Предпросмотр: --")
+            return
+        
+        if self.current_index >= 0 and self.current_index < len(self.tracks_info):
+            ti = self.tracks_info[self.current_index]
+            orig = os.path.splitext(os.path.basename(self.input_files[self.current_index]))[0]
+            ex_title = self.v_title.get() or ti.title or orig
+            ex_artist = self.v_artist.get() or ti.artist or ''
+            ex_album = self.v_album.get() or ti.album or ''
+            ex_year = self.v_year.get() or ti.year or ''
+            n_val = self.current_index + 1
+        else:
+            orig = 'example_track'
+            ex_title = 'Example Song'
+            ex_artist = 'Example Artist'
+            ex_album = 'Example Album'
+            ex_year = '2024'
+            n_val = 1
+        
+        try:
+            fname = tpl.format(
+                n=n_val,
+                original=self._safe_filename(orig),
+                title=self._safe_filename(ex_title),
+                artist=self._safe_filename(ex_artist),
+                album=self._safe_filename(ex_album),
+                year=self._safe_filename(str(ex_year)),
+            ) + '.mp3'
+            self.lbl_template_live_preview.config(
+                text=f"Предпросмотр: {fname}",
+                foreground='#007700'
+            )
+        except (KeyError, ValueError) as e:
+            self.lbl_template_live_preview.config(
+                text=f"Ошибка: {e}",
+                foreground='#cc0000'
+            )
+
+    def _save_user_template(self):
+        name = self.v_new_template_name.get().strip()
+        pattern = self.v_new_template_pattern.get().strip()
+        
+        if not name:
+            messagebox.showwarning("Внимание", "Введите имя шаблона")
+            return
+        if not pattern:
+            messagebox.showwarning("Внимание", "Введите шаблон")
+            return
+        
+        try:
+            pattern.format(n=1, original='test', title='test', artist='test', album='test', year='2024')
+        except (KeyError, ValueError) as e:
+            messagebox.showerror("Ошибка", f"Некорректный шаблон:\n{e}")
+            return
+        
+        for tpl in self.user_templates:
+            if tpl['name'] == name:
+                tpl['pattern'] = pattern
+                self._refresh_template_list()
+                self._save_config()
+                self._log(f"Шаблон '{name}' обновлён", 'success')
+                return
+        
+        self.user_templates.append({'name': name, 'pattern': pattern})
+        self._refresh_template_list()
+        self._save_config()
+        
+        self.v_new_template_name.set('')
+        self.v_new_template_pattern.set('')
+        self._log(f"Шаблон '{name}' сохранён", 'success')
+
+    def _on_template_select(self, event):
+        sel = self.template_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx < len(self.user_templates):
+            tpl = self.user_templates[idx]
+            self.v_new_template_name.set(tpl['name'])
+            self.v_new_template_pattern.set(tpl['pattern'])
+
+    def _use_selected_template(self):
+        sel = self.template_listbox.curselection()
+        if not sel:
+            messagebox.showinfo("Внимание", "Выберите шаблон в списке")
+            return
+        idx = sel[0]
+        if idx < len(self.user_templates):
+            pattern = self.user_templates[idx]['pattern']
+            self.v_filename_template.set(pattern)
+            self._update_name_preview()
+            self._log(f"Шаблон '{self.user_templates[idx]['name']}' активирован", 'success')
+
+    def _delete_selected_template(self):
+        sel = self.template_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx < len(self.user_templates):
+            name = self.user_templates[idx]['name']
+            if messagebox.askyesno("Подтверждение", f"Удалить шаблон '{name}'?"):
+                self.user_templates.pop(idx)
+                self._refresh_template_list()
+                self._save_config()
+                self._log(f"Шаблон '{name}' удалён", 'warning')
+
+    def _refresh_template_list(self):
+        self.template_listbox.delete(0, 'end')
+        for tpl in self.user_templates:
+            self.template_listbox.insert('end', f"{tpl['name']}  ->  {tpl['pattern']}")
+        
+        patterns = [t['pattern'] for t in self.user_templates]
+        if not patterns:
+            patterns = ['VK_{n:03d}_custom']
+        self.cmb_template['values'] = patterns
+        
+        current = self.v_filename_template.get()
+        if current not in patterns and patterns:
+            self.v_filename_template.set(patterns[0])
 
     def _build_waveform_section(self, parent):
         lf = ttk.LabelFrame(parent, text="Предпросмотр формы сигнала", padding=4)
@@ -1237,39 +1536,35 @@ Lossless форматы (без потерь):
         self._spin(f, self.v_pitch_val, -5.0, 5.0, 0.5).grid(row=r, column=1, padx=4, pady=(4, 0))
         ttk.Label(f, text="семитонов").grid(row=r, column=2, sticky='w', pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Транспонирует аудио на ±N полутонов без изменения темпа. "
-                             "При значениях до ±2 изменение практически неслышимо.")
-
+        self._desc(f, r, 0, "Транспонирует аудио на +/-N полутонов без изменения темпа.")
         r += 1
+
         ttk.Checkbutton(f, text="Изменить скорость (Time Stretch)", variable=self.v_speed,
                         command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         self._spin(f, self.v_speed_val, 0.90, 1.10, 0.01).grid(row=r, column=1, padx=4, pady=(4, 0))
         ttk.Label(f, text="x").grid(row=r, column=2, sticky='w', pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Ускоряет или замедляет трек с сохранением тональности. "
-                             "Значения 0.97–1.03 не воспринимаются на слух.")
-
+        self._desc(f, r, 0, "Ускоряет или замедляет трек с сохранением тональности.")
         r += 1
+
         ttk.Checkbutton(f, text="Эквализация (EQ)", variable=self.v_eq,
                         command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        eq_types = ["Стандарт: -2dB на 1 kHz", "Пресет Mid-Cut: 1k/2k -4/-2dB", "Пресет Air: 8k +3dB"]
+        eq_types = ["Стандарт: -2dB на 1 kHz", "Пресет Mid-Cut", "Пресет Air: 8k +3dB"]
         self.cmb_eq_type = ttk.Combobox(f, values=eq_types, width=26, state='readonly')
         self.cmb_eq_type.current(0)
         self.cmb_eq_type.grid(row=r, column=1, columnspan=2, padx=4, pady=(4, 0))
         self._spin(f, self.v_eq_val, -12.0, 12.0, 1.0, width=5).grid(row=r, column=3, padx=2, pady=(4, 0))
         ttk.Label(f, text="dB").grid(row=r, column=4, sticky='w', pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Ослабляет или усиливает выбранную частотную полосу. "
-                             "Mid-Cut убирает середину, Air добавляет яркость на верхах.")
-
+        self._desc(f, r, 0, "Ослабляет или усиливает выбранную частотную полосу.")
         r += 1
+
         ttk.Checkbutton(f, text="Добавить тишину в конец (Silent Pad)", variable=self.v_silence,
                         command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         self._spin(f, self.v_silence_val, 1, 300, 1, width=6, fmt=None).grid(row=r, column=1, padx=4, pady=(4, 0))
         ttk.Label(f, text="сек").grid(row=r, column=2, sticky='w', pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Добавляет тишину в конец файла, увеличивая его длительность и меняя хэш. "
-                             "Не совмещать с Fade Out.")
+        self._desc(f, r, 0, "Добавляет тишину в конец файла.")
 
         for v in (self.v_pitch_val, self.v_speed_val, self.v_eq_val, self.v_silence_val):
             v.trace_add('write', lambda *a: self._check_conflicts())
@@ -1279,37 +1574,21 @@ Lossless форматы (без потерь):
         nb.add(f, text="Спектральные")
 
         rows_data = [
-            ("Phase Invert - инверсия фазы правого канала",
-             self.v_phase_inv,
-             self._spin(f, self.v_phase_inv_val, 0.0, 1.0, 0.1), "сила",
-             "Инвертирует фазу правого канала, меняя пространственный отпечаток файла. "
-             "Сила 1.0 - полная инверсия, 0.5 - частичная."),
-            ("Phase Scramble - синусоидальная модуляция фазы (фазер)",
-             self.v_phase_scr,
-             self._spin(f, self.v_phase_scr_val, 0.1, 5.0, 0.1), "Гц",
-             "Синусоидально модулирует фазу сигнала, нарушая спектральный отпечаток. "
-             "При частоте <=2 Гц изменение не воспринимается на слух."),
-            ("DC Shift - постоянное смещение нуля",
-             self.v_dc,
-             self._spin(f, self.v_dc_val, 0.0, 0.0001, 0.000001, fmt='%.6f'), "",
-             "Добавляет постоянное смещение к каждому сэмплу, незаметно меняя хэш и спектрограмму. "
-             "Значение 0.000005 неотличимо на слух."),
-            ("Resample Drift - дрейф частоты дискретизации",
-             self.v_resamp,
-             self._spin(f, self.v_resamp_val, -100, 100, 1, fmt=None), "Гц",
-             "Пересэмплирует аудио с отклонением ±N Гц и обратно, оставляя уникальный спектральный артефакт. "
-             "Рекомендуется ±1-3 Гц."),
-            ("Haas Delay - стереоэффект задержки Хааса",
-             self.v_haas,
-             self._spin(f, self.v_haas_val, 0.0, 50.0, 0.5), "мс",
-             "Задерживает правый канал на N мс. При 5-30 мс эффект не слышен, "
-             "но полностью меняет стереокорреляцию файла."),
+            ("Phase Invert", self.v_phase_inv, self._spin(f, self.v_phase_inv_val, 0.0, 1.0, 0.1), "сила",
+             "Инвертирует фазу правого канала."),
+            ("Phase Scramble", self.v_phase_scr, self._spin(f, self.v_phase_scr_val, 0.1, 5.0, 0.1), "Гц",
+             "Синусоидальная модуляция фазы."),
+            ("DC Shift", self.v_dc, self._spin(f, self.v_dc_val, 0.0, 0.0001, 0.000001, fmt='%.6f'), "",
+             "Постоянное смещение сэмплов."),
+            ("Resample Drift", self.v_resamp, self._spin(f, self.v_resamp_val, -100, 100, 1, fmt=None), "Гц",
+             "Дрейф частоты дискретизации."),
+            ("Haas Delay", self.v_haas, self._spin(f, self.v_haas_val, 0.0, 50.0, 0.5), "мс",
+             "Задержка правого канала."),
         ]
 
         r = 0
         for title, var, spin, unit, desc in rows_data:
-            ttk.Checkbutton(f, text=title, variable=var,
-                            command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+            ttk.Checkbutton(f, text=title, variable=var, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
             spin.grid(row=r, column=1, padx=4, pady=(4, 0))
             if unit:
                 ttk.Label(f, text=unit).grid(row=r, column=2, sticky='w', pady=(4, 0))
@@ -1317,9 +1596,7 @@ Lossless форматы (без потерь):
             self._desc(f, r, 0, desc)
             r += 1
 
-        ttk.Checkbutton(f, text="Ultrasonic Noise - подмешивание ультразвука",
-                        variable=self.v_ultra,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        ttk.Checkbutton(f, text="Ultrasonic Noise", variable=self.v_ultra, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         sub_u = ttk.Frame(f)
         sub_u.grid(row=r, column=1, columnspan=3, sticky='w', pady=(4, 0))
         ttk.Label(sub_u, text="Freq:").pack(side='left')
@@ -1327,29 +1604,22 @@ Lossless форматы (без потерь):
         ttk.Label(sub_u, text="Hz  Level:").pack(side='left')
         self._spin(sub_u, self.v_ultra_level, 0.0, 0.01, 0.0001, fmt='%.4f').pack(side='left', padx=2)
         r += 1
-        self._desc(f, r, 0, "Подмешивает синусоиду выше 20 кГц - неслышимую, но полностью "
-                             "меняющую ультразвуковую часть спектра. Level <= 0.003.")
+        self._desc(f, r, 0, "Подмешивает неслышимый ультразвук.")
         r += 1
 
-        ttk.Checkbutton(f, text="Dither Attack - целенаправленный шум квантования",
-                        variable=self.v_dither,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        ttk.Checkbutton(f, text="Dither Attack", variable=self.v_dither, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         ttk.Combobox(f, textvariable=self.v_dither_method, width=16, state='readonly',
-                     values=['triangular_hp', 'rectangular', 'gaussian', 'lipshitz']
-                     ).grid(row=r, column=1, padx=4, pady=(4, 0))
+                     values=['triangular_hp', 'rectangular', 'gaussian', 'lipshitz']).grid(row=r, column=1, padx=4, pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "При конвертации в MP3 применяет выбранный алгоритм дитеринга, "
-                             "формируя уникальный шумовой профиль в тихих участках.")
+        self._desc(f, r, 0, "Шум квантования при конвертации в MP3.")
         r += 1
 
-        ttk.Checkbutton(f, text="ID3 Padding Attack - мусорные данные в тегах",
-                        variable=self.v_id3pad,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        ttk.Checkbutton(f, text="ID3 Padding Attack", variable=self.v_id3pad, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         self._spin(f, self.v_id3pad_val, 0, 2048, 64, width=6, fmt=None).grid(row=r, column=1, padx=4, pady=(4, 0))
         ttk.Label(f, text="байт").grid(row=r, column=2, sticky='w', pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Вставляет случайный мусор в теги ID3v2. "
-                             "Меняет MD5, размер и структуру файла, не затрагивая аудио.")
+        self._desc(f, r, 0, "Мусорные данные в тегах ID3v2.")
+        r += 1
 
         for v in (self.v_phase_scr_val, self.v_resamp_val, self.v_ultra_level):
             v.trace_add('write', lambda *a: self._check_conflicts())
@@ -1357,246 +1627,43 @@ Lossless форматы (без потерь):
     def _build_texture_tab(self, nb):
         f = ttk.Frame(nb, padding=6)
         nb.add(f, text="Текстурные")
-        f.columnconfigure(0, weight=0)
 
         r = 0
-        ttk.Checkbutton(f, text="Спектральное маскирование (Spectral Masking)",
-                        variable=self.v_spectral_mask,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        ttk.Checkbutton(f, text="Спектральное маскирование", variable=self.v_spectral_mask, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        
-        mask_frame = ttk.Frame(f)
-        mask_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-        
-        ttk.Label(mask_frame, text="Чувствительность:").grid(row=0, column=0, sticky='w', padx=2)
-        self._spin(mask_frame, self.v_spectral_mask_sens, 0.3, 1.5, 0.1, width=6).grid(row=0, column=1, padx=2)
-        ttk.Label(mask_frame, text="(0.5-1.2)").grid(row=0, column=2, sticky='w', padx=2)
-        
-        ttk.Label(mask_frame, text="Подавление:").grid(row=0, column=3, sticky='w', padx=(20,2))
-        self._spin(mask_frame, self.v_spectral_mask_att, 5, 20, 1, width=5, fmt=None).grid(row=0, column=4, padx=2)
-        ttk.Label(mask_frame, text="dB").grid(row=0, column=5, sticky='w', padx=2)
-        
-        ttk.Label(mask_frame, text="Макс. пиков:").grid(row=0, column=6, sticky='w', padx=(20,2))
-        self._spin(mask_frame, self.v_spectral_mask_peaks, 5, 20, 1, width=5, fmt=None).grid(row=0, column=7, padx=2)
-        
+        ttk.Checkbutton(f, text="Эмуляция концертной записи", variable=self.v_concert_emu, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Анализирует спектр и точечно подавляет наиболее энергичные частоты. "
-                             "Разрушает акустические якоря отпечатка без заметных изменений на слух.")
+        ttk.Checkbutton(f, text="Mid/Side обработка", variable=self.v_midside, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        ttk.Checkbutton(f, text="Эмуляция концертной записи (Concert Emulation)",
-                        variable=self.v_concert_emu,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        ttk.Checkbutton(f, text="Психоакустический шум", variable=self.v_psycho_noise, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        
-        concert_frame = ttk.Frame(f)
-        concert_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-        
-        ttk.Label(concert_frame, text="Интенсивность:").pack(side='left', padx=2)
-        cmb_concert = ttk.Combobox(concert_frame, textvariable=self.v_concert_intensity,
-                                   values=['light', 'medium', 'heavy'], width=10, state='readonly')
-        cmb_concert.current(1)
-        cmb_concert.pack(side='left', padx=5)
-        ttk.Label(concert_frame, text="(light/medium/heavy)").pack(side='left', padx=2)
-        
+        ttk.Checkbutton(f, text="Аналоговое насыщение", variable=self.v_saturation, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Имитирует запись в зале или радиоэфир: реверберация, "
-                             "сужение стереобазы, компрессия и лёгкая эквализация.")
+        ttk.Checkbutton(f, text="Временной джиттер", variable=self.v_temp_jitter, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        ttk.Checkbutton(f, text="Mid/Side обработка",
-                        variable=self.v_midside,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        ttk.Checkbutton(f, text="Спектральный джиттер", variable=self.v_spec_jitter, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        
-        ms_frame = ttk.Frame(f)
-        ms_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-        
-        ttk.Label(ms_frame, text="Mid (центр):").grid(row=0, column=0, sticky='w', padx=2)
-        self._spin(ms_frame, self.v_midside_mid, -12.0, 6.0, 0.5, width=6).grid(row=0, column=1, padx=2)
-        ttk.Label(ms_frame, text="dB").grid(row=0, column=2, sticky='w', padx=2)
-        
-        ttk.Label(ms_frame, text="Side (бока):").grid(row=0, column=3, sticky='w', padx=(20,2))
-        self._spin(ms_frame, self.v_midside_side, -6.0, 12.0, 0.5, width=6).grid(row=0, column=4, padx=2)
-        ttk.Label(ms_frame, text="dB").grid(row=0, column=5, sticky='w', padx=2)
-        
-        r += 1
-        self._desc(f, r, 0, "Независимо регулирует уровень Mid (центр: вокал, бас) и Side (бока: атмосфера, реверб). "
-                             "Меняет пространство звука без явных артефактов.")
-        r += 1
-        ttk.Checkbutton(f, text="Психоакустический шум (Psychoacoustic Noise)",
-                        variable=self.v_psycho_noise,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        r += 1
-        
-        noise_frame = ttk.Frame(f)
-        noise_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-        
-        ttk.Label(noise_frame, text="Интенсивность:").pack(side='left', padx=2)
-        self._spin(noise_frame, self.v_psycho_intensity, 0.0001, 0.002, 0.0001, fmt='%.4f', width=7).pack(side='left', padx=5)
-        ttk.Label(noise_frame, text="(0.0002-0.0008)").pack(side='left', padx=2)
-        
-        r += 1
-        self._desc(f, r, 0, "Вводит высокочастотный интерференционный шум, скрытый за основным сигналом. "
-                             "На слух не различим, но меняет спектральный отпечаток.")
-        r += 1
-        ttk.Checkbutton(f, text="Аналоговое насыщение (Saturation)",
-                        variable=self.v_saturation,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        r += 1
-        
-        sat_frame = ttk.Frame(f)
-        sat_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-        
-        ttk.Label(sat_frame, text="Drive:").grid(row=0, column=0, sticky='w', padx=2)
-        self._spin(sat_frame, self.v_saturation_drive, 1.0, 3.0, 0.1, width=6).grid(row=0, column=1, padx=2)
-        
-        ttk.Label(sat_frame, text="Mix:").grid(row=0, column=2, sticky='w', padx=(20,2))
-        self._spin(sat_frame, self.v_saturation_mix, 0.05, 0.4, 0.05, width=6).grid(row=0, column=3, padx=2)
-        
-        r += 1
-        self._desc(f, r, 0, "Добавляет мягкие гармонические искажения в стиле аналоговой ленты. "
-                             "Drive - насыщенность; Mix - доля эффекта в итоговом сигнале.")
-        r += 1
-        ttk.Checkbutton(f, text="Временной джиттер (Temporal Jitter)",
-                        variable=self.v_temp_jitter,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        r += 1
-        
-        jitter_frame = ttk.Frame(f)
-        jitter_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-        
-        ttk.Label(jitter_frame, text="Амплитуда:").grid(row=0, column=0, sticky='w', padx=2)
-        self._spin(jitter_frame, self.v_jitter_intensity, 0.001, 0.01, 0.001, fmt='%.3f', width=7).grid(row=0, column=1, padx=2)
-        
-        ttk.Label(jitter_frame, text="Частота:").grid(row=0, column=2, sticky='w', padx=(20,2))
-        self._spin(jitter_frame, self.v_jitter_freq, 0.1, 2.0, 0.1, width=6).grid(row=0, column=3, padx=2)
-        ttk.Label(jitter_frame, text="Гц").grid(row=0, column=4, sticky='w', padx=2)
-        
-        r += 1
-        self._desc(f, r, 0, "Вводит синусоидальные микровариации скорости, имитируя нестабильность "
-                             "аналоговых носителей. Не слышно при амплитуде < 0.003.")
-        r += 1
-        ttk.Checkbutton(f, text="Спектральный джиттер (Spectral Jitter)",
-                        variable=self.v_spec_jitter,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        r += 1
-        
-        sj_frame = ttk.Frame(f)
-        sj_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-        
-        ttk.Label(sj_frame, text="Провалов:").grid(row=0, column=0, sticky='w', padx=2)
-        self._spin(sj_frame, self.v_spec_jitter_count, 3, 12, 1, width=5, fmt=None).grid(row=0, column=1, padx=2)
-        
-        ttk.Label(sj_frame, text="Подавление:").grid(row=0, column=2, sticky='w', padx=(20,2))
-        self._spin(sj_frame, self.v_spec_jitter_att, 8, 20, 1, width=5, fmt=None).grid(row=0, column=3, padx=2)
-        ttk.Label(sj_frame, text="dB").grid(row=0, column=4, sticky='w', padx=2)
-        
-        r += 1
-        self._desc(f, r, 0, "Случайно расставляет узкие провалы в спектре. В отличие от Spectral Masking, "
-                             "позиции не зависят от анализа - каждый трек получает уникальный паттерн.")
-        r += 1
-
         ttk.Separator(f, orient='horizontal').grid(row=r, column=0, columnspan=5, sticky='ew', pady=6)
         r += 1
-
-        ttk.Checkbutton(f, text="VK Инфразвук 10 Гц (Anti-VK Content ID)",
-                        variable=self.v_vk_infra,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        ttk.Checkbutton(f, text="VK Инфразвук", variable=self.v_vk_infra, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-
-        vk_frame = ttk.Frame(f)
-        vk_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=22, pady=2)
-
-        ttk.Label(vk_frame, text="Режим:").grid(row=0, column=0, sticky='w', padx=2)
-        cmb_vk = ttk.Combobox(vk_frame, textvariable=self.v_vk_infra_mode,
-                               values=['simple', 'modulated', 'phase', 'maximum'],
-                               width=12, state='readonly')
-        cmb_vk.current(1)
-        cmb_vk.grid(row=0, column=1, padx=5)
-
-        ttk.Label(vk_frame, text="Амплитуда:").grid(row=0, column=2, sticky='w', padx=(20, 2))
-        self._spin(vk_frame, self.v_vk_infra_amplitude, 0.05, 0.70, 0.05,
-                   fmt='%.2f', width=6).grid(row=0, column=3, padx=2)
-
-        r += 1
-        self._desc(f, r, 0,
-                   "Подмешивает инфразвуковую синусоиду 10-20 Гц к аудиосигналу, меняя форму волны "
-                   "и акустический отпечаток. Амплитуда 0.30-0.45 безопасна; выше 0.5 - клиппинг.")
-        r += 1
-
-        for v in (self.v_spectral_mask_sens, self.v_spectral_mask_att, self.v_midside_mid,
-                  self.v_midside_side, self.v_psycho_intensity, self.v_saturation_drive,
-                  self.v_saturation_mix, self.v_jitter_intensity, self.v_jitter_freq,
-                  self.v_vk_infra_amplitude):
-            v.trace_add('write', lambda *a: self._check_conflicts())
-
-        for v in (self.v_vk_infra, self.v_vk_infra_freq, self.v_vk_infra_amplitude,
-                self.v_vk_infra_mode, self.v_vk_infra_mod_freq, self.v_vk_infra_mod_depth,
-                self.v_vk_infra_phase_shift, self.v_vk_infra_waveform, self.v_vk_infra_adaptive,
-                self.v_vk_infra_h1, self.v_vk_infra_h2, self.v_vk_infra_h3):
-            v.trace_add('write', lambda *a: self._schedule_preview_update())
+        self._desc(f, r, 0, "Подмешивает инфразвуковую синусоиду.")
 
     def _build_advanced_tab(self, nb):
         f = ttk.Frame(nb, padding=6)
         nb.add(f, text="Дополнительные")
 
         r = 0
-        ttk.Checkbutton(f, text="Обрезать начало (Trim)", variable=self.v_trim,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        self._spin(f, self.v_trim_val, 0.1, 10.0, 0.1).grid(row=r, column=1, padx=4, pady=(4, 0))
-        ttk.Label(f, text="сек").grid(row=r, column=2, sticky='w', pady=(4, 0))
+        ttk.Checkbutton(f, text="Обрезать начало", variable=self.v_trim, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Удаляет первые N секунд трека. Убирает интро или вступительную тишину, "
-                             "делая отпечаток несравнимым с оригиналом.")
-
+        ttk.Checkbutton(f, text="Вырезать фрагмент", variable=self.v_cut, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        ttk.Checkbutton(f, text="Вырезать фрагмент (Cut Fragment)", variable=self.v_cut,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        sub_c = ttk.Frame(f)
-        sub_c.grid(row=r, column=1, columnspan=3, sticky='w', pady=(4, 0))
-        ttk.Label(sub_c, text="Позиция:").pack(side='left')
-        self._spin(sub_c, self.v_cut_pos, 0, 100, 1, width=5, fmt=None).pack(side='left', padx=2)
-        ttk.Label(sub_c, text="%  Длина:").pack(side='left')
-        self._spin(sub_c, self.v_cut_dur, 0.1, 30.0, 0.1).pack(side='left', padx=2)
-        ttk.Label(sub_c, text="сек").pack(side='left')
+        ttk.Checkbutton(f, text="Плавное затухание", variable=self.v_fade, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Вырезает N секунд из указанной позиции, склеивая оставшиеся части. "
-                             "Меняет длительность и хронологический отпечаток трека.")
-
+        ttk.Checkbutton(f, text="Сращивание треков", variable=self.v_merge, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        ttk.Checkbutton(f, text="Плавное затухание в конце (Fade Out)", variable=self.v_fade,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        self._spin(f, self.v_fade_val, 0.5, 10.0, 0.5).grid(row=r, column=1, padx=4, pady=(4, 0))
-        ttk.Label(f, text="сек").grid(row=r, column=2, sticky='w', pady=(4, 0))
+        ttk.Checkbutton(f, text="Подмена длительности", variable=self.v_broken, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
         r += 1
-        self._desc(f, r, 0, "Плавно снижает громкость в последних N секундах. "
-                             "Меняет амплитудный профиль конца трека. Не совмещать с Silent Pad.")
-
-        r += 1
-        ttk.Checkbutton(f, text="Сращивание треков (Merge)", variable=self.v_merge,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        sub_m = ttk.Frame(f)
-        sub_m.grid(row=r, column=1, columnspan=3, sticky='ew', pady=(4, 0))
-        self.entry_extra = ttk.Entry(sub_m, textvariable=self.v_extra, width=28)
-        self.entry_extra.pack(side='left', padx=2)
-        ttk.Button(sub_m, text="...", width=3, command=self._select_extra_track).pack(side='left')
-        r += 1
-        self._desc(f, r, 0, "Склеивает текущий трек с выбранным файлом, нормализуя оба до 44100 Гц PCM. "
-                             "Результат имеет другую длительность, хэш и акустический профиль.")
-
-        r += 1
-        ttk.Checkbutton(f, text="Подмена метаданных длительности (Broken Duration)",
-                        variable=self.v_broken,
-                        command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
-        self.cmb_broken = ttk.Combobox(f, width=22, state='readonly',
-                                       values=['Раздуть (x50-200, часы)',
-                                               'Обнулить (0.1-3 сек)',
-                                               'Случайная (1 мин - 2 ч)',
-                                               'Максимум (~4660 ч)'])
-        self.cmb_broken.current(0)
-        self.cmb_broken.grid(row=r, column=1, columnspan=2, padx=4, pady=(4, 0))
-        r += 1
-        self._desc(f, r, 0, "Записывает ложную длительность в метаданные файла. "
-                             "Плеер будет показывать неверное время, само аудио воспроизводится без изменений.")
 
         self.v_merge.trace_add('write', lambda *a: self._check_conflicts())
         self.v_extra.trace_add('write', lambda *a: self._check_conflicts())
@@ -1606,30 +1673,17 @@ Lossless форматы (без потерь):
         nb.add(f, text="Технические")
 
         tech_items = [
-            ("Рандомизация битрейта (Bitrate Jitter)",
-             self.v_bitrate_j,
-             "Кодирует с случайным постоянным битрейтом из [192/224/256/320 кбит/с]. "
-             "Меняет размер файла и его акустическую статистику."),
-            ("Удаление заголовка Xing (Frame Shift)",
-             self.v_frame_sh,
-             "Убирает Xing-заголовок из VBR-файла, нарушая навигацию в некоторых плеерах "
-             "и делая структуру нестандартной."),
-            ("Мусор в поле comment (Fake Metadata)",
-             self.v_fake_meta,
-             "Вставляет 100-500 случайных символов в поле comment, делая файл "
-             "уникальным по тегам и меняя хэш метаданных."),
-            ("Переупорядочить ID3 теги (Reorder Tags)",
-             self.v_reorder,
-             "Переупорядочивает блок ID3v2.3 тегов, меняя их структуру и смещения внутри файла. "
-             "Аудиоданные не затрагиваются."),
+            ("Рандомизация битрейта", self.v_bitrate_j),
+            ("Удаление заголовка Xing", self.v_frame_sh),
+            ("Мусор в поле comment", self.v_fake_meta),
+            ("Переупорядочить ID3 теги", self.v_reorder),
         ]
 
         r = 0
-        for title, var, desc in tech_items:
-            ttk.Checkbutton(f, text=title, variable=var,
-                            command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
+        for title, var in tech_items:
+            ttk.Checkbutton(f, text=title, variable=var, command=self._check_conflicts).grid(row=r, column=0, sticky='w', padx=4, pady=(4, 0))
             r += 1
-            self._desc(f, r, 0, desc)
+            self._desc(f, r, 0, "")
             r += 1
 
     def _build_system_tab(self, nb):
@@ -1637,58 +1691,29 @@ Lossless форматы (без потерь):
         nb.add(f, text="Системные")
 
         cpu_count = os.cpu_count() or 4
-
         r = 0
-        ttk.Label(f, text="Параллельных потоков:", font=('', 9, 'bold')).grid(
-            row=r, column=0, sticky='w', padx=4, pady=(8, 2))
+        ttk.Label(f, text="Параллельных потоков:", font=('', 9, 'bold')).grid(row=r, column=0, sticky='w', padx=4, pady=(8, 2))
         r += 1
-
         thread_frame = ttk.Frame(f)
         thread_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=4, pady=2)
-        self._spin(thread_frame, self.v_max_workers, 1, min(16, cpu_count * 2), 1,
-                   width=5, fmt=None).pack(side='left', padx=2)
-        ttk.Button(thread_frame, text=f"Авто ({cpu_count})",
-                   command=lambda: self.v_max_workers.set(cpu_count)).pack(side='left', padx=8)
-        ttk.Label(thread_frame, text=f"CPU: {cpu_count} ядер").pack(side='left', padx=4)
-
+        self._spin(thread_frame, self.v_max_workers, 1, min(16, cpu_count * 2), 1, width=5, fmt=None).pack(side='left', padx=2)
+        ttk.Button(thread_frame, text=f"Авто ({cpu_count})", command=lambda: self.v_max_workers.set(cpu_count)).pack(side='left', padx=8)
         r += 1
-        self._desc(f, r, 0, "Рекомендуется: 2-4 потока для HDD, 4-8 для SSD. "
-                             "Слишком много потоков замедляет FFmpeg из-за конкуренции за диск.")
-
+        self._desc(f, r, 0, "")
         r += 1
-        ttk.Label(f, text="Задержка между запусками (сек):", font=('', 9)).grid(
-            row=r, column=0, sticky='w', padx=4, pady=(8, 2))
+        ttk.Label(f, text="Задержка между запусками (сек):", font=('', 9)).grid(row=r, column=0, sticky='w', padx=4, pady=(8, 2))
         r += 1
-
         delay_frame = ttk.Frame(f)
         delay_frame.grid(row=r, column=0, columnspan=4, sticky='w', padx=4, pady=2)
         self._spin(delay_frame, self.v_thread_delay, 0.0, 5.0, 0.1, width=6).pack(side='left', padx=2)
-        ttk.Label(delay_frame, text="сек (0 = без задержки)").pack(side='left', padx=4)
-
         r += 1
-        self._desc(f, r, 0, "Небольшая задержка (0.1-0.5 сек) снижает нагрузку на CPU при старте задач.")
-
+        self._desc(f, r, 0, "")
         r += 1
         ttk.Separator(f, orient='horizontal').grid(row=r, column=0, columnspan=4, sticky='ew', pady=8)
-
         r += 1
-        ttk.Label(f, text="Drag & Drop:", font=('', 9, 'bold')).grid(
-            row=r, column=0, sticky='w', padx=4)
+        ttk.Label(f, text=f"Drag & Drop: {'доступен' if _DND_AVAILABLE else 'недоступен'}", font=('', 9)).grid(row=r, column=0, sticky='w', padx=4)
         r += 1
-        dnd_text = "доступен (tkinterdnd2 установлен)" if _DND_AVAILABLE else \
-                   "недоступен -> pip install tkinterdnd2"
-        dnd_color = '#007700' if _DND_AVAILABLE else '#aa6600'
-        ttk.Label(f, text=dnd_text, foreground=dnd_color).grid(
-            row=r, column=0, sticky='w', padx=22)
-
-        r += 1
-        ttk.Label(f, text="Горячие клавиши:", font=('', 9, 'bold')).grid(
-            row=r, column=0, sticky='w', padx=4, pady=(8, 2))
-        r += 1
-        keys_text = ("Ctrl+O - открыть файлы  |  Ctrl+A - выделить все  |  Delete - удалить файл\n"
-                     "Ctrl+C - копировать имена файлов  |  Ctrl+S - сохранить пресет")
-        ttk.Label(f, text=keys_text, foreground='#555', font=('', 8)).grid(
-            row=r, column=0, columnspan=4, sticky='w', padx=22)
+        ttk.Label(f, text="Горячие клавиши: Ctrl+O, Ctrl+A, Delete, Ctrl+S", font=('', 8), foreground='#555').grid(row=r, column=0, columnspan=4, sticky='w', padx=22)
 
     def _build_output_section(self, parent):
         lf = ttk.LabelFrame(parent, text="Настройки вывода", padding=6)
@@ -1697,46 +1722,136 @@ Lossless форматы (без потерь):
         dir_row = ttk.Frame(lf)
         dir_row.pack(fill='x', pady=2)
         ttk.Button(dir_row, text="Выбрать папку", command=self._select_output_dir).pack(side='left')
-        self.lbl_out_dir = ttk.Label(dir_row, text=self.output_dir, relief='sunken',
-                                     padding=2, width=30)
+        self.lbl_out_dir = ttk.Label(dir_row, text=self.output_dir, relief='sunken', padding=2, width=30)
         self.lbl_out_dir.pack(side='left', padx=4, fill='x', expand=True)
 
-        ttk.Checkbutton(lf, text="Сохранить оригинальные теги",   variable=self.v_preserve_meta).pack(anchor='w')
-        ttk.Checkbutton(lf, text="Сохранить оригинальную обложку",variable=self.v_preserve_cover).pack(anchor='w')
+        ttk.Checkbutton(lf, text="Сохранить оригинальные теги", variable=self.v_preserve_meta).pack(anchor='w')
+        ttk.Checkbutton(lf, text="Сохранить оригинальную обложку", variable=self.v_preserve_cover).pack(anchor='w')
         ttk.Checkbutton(lf, text="Удалять оригиналы после обработки", variable=self.v_delete_orig).pack(anchor='w')
 
-        tpl_frame = ttk.Frame(lf)
-        tpl_frame.pack(fill='x', pady=(6, 0))
-        ttk.Label(tpl_frame, text="Шаблон имени:").pack(side='left')
-        _PRESETS = [
-            'VK_{n:03d}_custom',
-            'modified_{original}',
-            '{artist} - {title}',
-            '{title}',
-            '{original}_{n:03d}',
-        ]
-        cmb = ttk.Combobox(tpl_frame, textvariable=self.v_filename_template,
-                           values=_PRESETS, width=22)
-        cmb.pack(side='left', padx=4)
-        ttk.Label(tpl_frame, text="?", foreground='#888',
-                  cursor='question_arrow').pack(side='left')
-        self.v_filename_template.trace_add('write', lambda *_: self._update_name_preview())
+        q_frame = ttk.Frame(lf)
+        q_frame.pack(fill='x', pady=(8, 2))
+        ttk.Label(q_frame, text="Качество аудио:", font=('', 9, 'bold')).pack(side='left')
+        self.cmb_quality = ttk.Combobox(q_frame, textvariable=self.v_quality, width=20, state='readonly',
+                                        values=['320 kbps (CBR)', '245 kbps (VBR Q0)', '175 kbps (VBR Q4)', '130 kbps (VBR Q6)'])
+        self.cmb_quality.pack(side='left', padx=4)
+        ttk.Label(lf, text="320 kbps -- макс. качество | 130 kbps -- мин. размер", foreground='#888', font=('', 7)).pack(anchor='w', pady=(2, 0))
 
-        hint = ttk.Label(lf, text="{n} - номер  {original} - исх. имя  {title} {artist} {album} {year}",
-                         foreground='#666', font=('', 7))
-        hint.pack(anchor='w')
+    def _show_template_help(self):
+        help_win = tk.Toplevel(self.root)
+        help_win.title("Помощь по шаблонам имён файлов")
+        help_win.geometry("700x600")
+        help_win.minsize(600, 500)
+        help_win.transient(self.root)
+        help_win.grab_set()
+        
+        main_frame = ttk.Frame(help_win, padding=10)
+        main_frame.pack(fill='both', expand=True)
+        
+        ttk.Label(main_frame, text="Документация по шаблонам имён файлов", font=('', 12, 'bold')).pack(anchor='w', pady=(0, 10))
+        
+        text = tk.Text(main_frame, wrap='word', font=('Consolas', 10), padx=10, pady=10, bg='#f8f9fa')
+        scroll = ttk.Scrollbar(main_frame, orient='vertical', command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right', fill='y')
+        text.pack(side='left', fill='both', expand=True)
+        
+        help_content = """================================================================================
+                    ШАБЛОНЫ ИМЁН ФАЙЛОВ -- ПОЛНОЕ РУКОВОДСТВО
+================================================================================
 
-        self.lbl_file_preview = ttk.Label(lf, text="Предпросмотр: -",
-                                          foreground='#888', font=('', 8))
-        self.lbl_file_preview.pack(anchor='w', pady=(0, 4))
+1. ДОСТУПНЫЕ ПЕРЕМЕННЫЕ
+--------------------------------------------------------------------------------
 
-        q_row = ttk.Frame(lf)
-        q_row.pack(fill='x', pady=4)
-        ttk.Label(q_row, text="Качество:").pack(side='left')
-        ttk.Combobox(q_row, textvariable=self.v_quality, width=20, state='readonly',
-                     values=['320 kbps (CBR)', '245 kbps (VBR Q0)', '175 kbps (VBR Q4)',
-                             '130 kbps (VBR Q6)']
-                     ).pack(side='left', padx=4)
+    {n}           -> Порядковый номер файла (1, 2, 3, 4...)
+    {n:03d}       -> Номер с ведущими нулями (001, 002, 003...)
+    {n:04d}       -> Номер с ведущими нулями (0001, 0002...)
+    {original}    -> Исходное имя файла (без расширения .mp3)
+    {title}       -> Название трека из метаданных (с учётом REUPLOAD текста)
+    {artist}      -> Имя исполнителя
+    {album}       -> Название альбома
+    {year}        -> Год выпуска
+
+2. КАК РАБОТАЕТ "REUPLOAD" ТЕКСТ
+--------------------------------------------------------------------------------
+
+    Текст из поля "Добавить текст" (например, "(REUPLOAD)") добавляется 
+    НЕПОСРЕДСТВЕННО в переменную {title}!
+
+    Пример работы:
+        - Исходный title в метаданных: "My Song"
+        - Текст REUPLOAD: "(REUPLOAD)"
+        - Позиция: "После"
+        -> Итоговый title: "My Song (REUPLOAD)"
+
+    ВАЖНО: REUPLOAD попадёт в имя файла ТОЛЬКО если в шаблоне есть {title}!
+
+3. ПРИМЕРЫ ШАБЛОНОВ И РЕЗУЛЬТАТОВ
+--------------------------------------------------------------------------------
+
+    ШАБЛОН                                  | РЕЗУЛЬТАТ
+    ----------------------------------------+------------------------------------------
+    {title}                                 | My Summer Hit (REUPLOAD).mp3
+    {artist} - {title}                      | DJ Example - My Summer Hit (REUPLOAD).mp3
+    {n:03d} - {artist} - {title}            | 005 - DJ Example - My Summer Hit.mp3
+    {original}_{n:02d}                      | my_summer_hit_05.mp3
+    VK_{n:03d}_custom                       | VK_005_custom.mp3
+    modified_{original}                     | modified_my_summer_hit.mp3
+    {artist} - {album} - {n:02d} - {title}  | DJ Example - Summer Vibes 2024 - 05.mp3
+    {year} - {artist} - {title}             | 2024 - DJ Example - My Summer Hit.mp3
+    {title} (modified)                      | My Summer Hit (REUPLOAD) (modified).mp3
+
+4. ПРАКТИЧЕСКИЕ СОВЕТЫ
+--------------------------------------------------------------------------------
+
+    - Чтобы REUPLOAD НЕ попадал в имя файла:
+      Используйте шаблоны БЕЗ {title}: {original}, VK_{n:03d}, modified_{original}
+
+    - Чтобы REUPLOAD БЫЛ в имени файла:
+      Используйте шаблоны С {title}: {title}, {artist} - {title}
+
+    - Для сортировки файлов по порядку:
+      Начинайте шаблон с номера: {n:03d} - {artist} - {title}
+
+    - Фигурные скобки {} -- обязательны для переменных
+    - Любой текст вне скобок остаётся без изменений
+    - Недопустимые символы (\\/:*?\"<>|) автоматически заменяются на _
+    - Ctrl+C/V/X/A работают во всех текстовых полях программы
+
+5. ТИПИЧНЫЕ СЦЕНАРИИ
+--------------------------------------------------------------------------------
+
+    Сценарий A: "Хочу просто добавить REUPLOAD в название"
+        Шаблон: {title}
+        Настройка REUPLOAD: Да, позиция "После"
+        Результат: My Song (REUPLOAD).mp3
+
+    Сценарий B: "REUPLOAD в начале, с номером и исполнителем"
+        Шаблон: {n:03d} - {artist} - {title}
+        Настройка REUPLOAD: Да, позиция "До"
+        Результат: 005 - DJ Example - (REUPLOAD) My Song.mp3
+
+    Сценарий C: "Без REUPLOAD, только нумерованные треки"
+        Шаблон: track_{n:03d}
+        Результат: track_005.mp3
+
+    Сценарий D: "Сохранить оригинальное имя с префиксом"
+        Шаблон: vk_{original}
+        Результат: vk_my_summer_hit.mp3
+
+    Сценарий E: "Полная информация об альбоме"
+        Шаблон: {year} - {artist} - {album} - {n:02d} - {title}
+        Результат: 2024 - DJ Example - Summer Vibes 2024 - 05.mp3
+"""
+        text.insert('1.0', help_content)
+        text.config(state='disabled')
+        
+        ttk.Button(main_frame, text="Закрыть", command=help_win.destroy, width=15).pack(pady=(10, 0))
+        
+        help_win.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - help_win.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - help_win.winfo_height()) // 2
+        help_win.geometry(f"+{x}+{y}")
 
     def _build_preset_management(self, parent):
         lf = ttk.LabelFrame(parent, text="Управление пресетами", padding=6)
@@ -1753,8 +1868,7 @@ Lossless форматы (без потерь):
         ttk.Button(btn_row, text="Импорт",  command=self._import_preset).pack(side='left', padx=2)
 
         sb2 = ttk.Scrollbar(lf, orient='vertical')
-        self.preset_listbox = tk.Listbox(lf, yscrollcommand=sb2.set, height=5, width=28,
-                                         exportselection=False)
+        self.preset_listbox = tk.Listbox(lf, yscrollcommand=sb2.set, height=5, width=28, exportselection=False)
         sb2.config(command=self.preset_listbox.yview)
         sb2.pack(side='right', fill='y')
         self.preset_listbox.pack(fill='both', expand=True)
@@ -1788,21 +1902,20 @@ Lossless форматы (без потерь):
         self.log_text.tag_config('warning', foreground='#aa6600')
         self.log_text.tag_config('error',   foreground='#cc0000')
 
-    _TEXT_CLASSES = frozenset(('Entry', 'TEntry', 'Text', 'TCombobox', 'TSpinbox'))
+    def _safe_filename(self, s):
+        import re
+        safe = re.sub(r'[\\/*?:"<>|]', '_', str(s))
+        safe = ' '.join(safe.split())
+        return safe.strip() or '_'
 
     def _setup_hotkeys(self):
-        def _guard(cmd):
-            def handler(e):
-                if e.widget.winfo_class() in self._TEXT_CLASSES:
-                    return
-                cmd()
-                return 'break'
-            return handler
+        """Горячие клавиши через bind_class — работают ВЕЗДЕ."""
 
-        self.root.bind('<Control-o>', _guard(self._add_files_dialog))
-        self.root.bind('<Control-O>', _guard(self._add_files_dialog))
-        self.root.bind('<Control-s>', _guard(self._save_preset))
-        self.root.bind('<Control-S>', _guard(self._save_preset))
+        # ─── Глобальные клавиши (не для текстовых полей) ───
+        self.root.bind('<Control-o>', lambda e: self._add_files_dialog())
+        self.root.bind('<Control-O>', lambda e: self._add_files_dialog())
+        self.root.bind('<Control-s>', lambda e: self._save_preset())
+        self.root.bind('<Control-S>', lambda e: self._save_preset())
 
         self.file_listbox.bind('<Control-a>', self._listbox_select_all)
         self.file_listbox.bind('<Control-A>', self._listbox_select_all)
@@ -1810,75 +1923,150 @@ Lossless форматы (без потерь):
         self.file_listbox.bind('<Control-c>', self._listbox_copy)
         self.file_listbox.bind('<Control-C>', self._listbox_copy)
 
-        def _e_copy(e):
+        # ─── Универсальные обработчики через bind_class ───
+
+        def _entry_copy(e):
             try:
-                e.widget.clipboard_clear()
-                e.widget.clipboard_append(e.widget.selection_get())
-            except Exception:
+                w = e.widget
+                if w.selection_present():
+                    w.clipboard_clear()
+                    w.clipboard_append(w.selection_get())
+            except:
                 pass
             return 'break'
 
-        def _e_paste(e):
+        def _entry_paste(e):
             try:
-                text = e.widget.clipboard_get()
-            except Exception:
-                return 'break'
-            try:
-                e.widget.delete('sel.first', 'sel.last')
-            except Exception:
-                pass
-            try:
-                e.widget.insert('insert', text)
-            except Exception:
+                w = e.widget
+                text = w.clipboard_get()
+                if w.selection_present():
+                    w.delete('sel.first', 'sel.last')
+                w.insert('insert', text)
+            except:
                 pass
             return 'break'
 
-        def _e_cut(e):
+        def _entry_cut(e):
             try:
-                if e.widget.selection_present():
-                    e.widget.clipboard_clear()
-                    e.widget.clipboard_append(e.widget.selection_get())
-                    e.widget.delete('sel.first', 'sel.last')
-            except Exception:
+                w = e.widget
+                if w.selection_present():
+                    w.clipboard_clear()
+                    w.clipboard_append(w.selection_get())
+                    w.delete('sel.first', 'sel.last')
+            except:
                 pass
             return 'break'
 
-        def _e_sel_all(e):
+        def _entry_select_all(e):
             try:
-                e.widget.select_range(0, 'end')
-                e.widget.icursor('end')
-            except Exception:
+                w = e.widget
+                w.select_range(0, 'end')
+                w.icursor('end')
+            except:
                 pass
             return 'break'
-
-        def _walk_and_bind(widget):
-            cls = widget.winfo_class()
-            if cls in ('TEntry', 'Entry'):
-                widget.bind('<Control-c>', _e_copy)
-                widget.bind('<Control-C>', _e_copy)
-                widget.bind('<Control-v>', _e_paste)
-                widget.bind('<Control-V>', _e_paste)
-                widget.bind('<Control-x>', _e_cut)
-                widget.bind('<Control-X>', _e_cut)
-                widget.bind('<Control-a>', _e_sel_all)
-                widget.bind('<Control-A>', _e_sel_all)
-            for child in widget.winfo_children():
-                _walk_and_bind(child)
-
-        _walk_and_bind(self.root)
 
         def _text_copy(e):
             try:
-                e.widget.clipboard_clear()
-                e.widget.clipboard_append(e.widget.get('sel.first', 'sel.last'))
-            except Exception:
+                w = e.widget
+                if w.tag_ranges('sel'):
+                    text = w.get('sel.first', 'sel.last')
+                    w.clipboard_clear()
+                    w.clipboard_append(text)
+            except:
                 pass
             return 'break'
 
-        self.log_text.bind('<Control-c>', _text_copy)
-        self.log_text.bind('<Control-C>', _text_copy)
-        self.conv_log_text.bind('<Control-c>', _text_copy)
-        self.conv_log_text.bind('<Control-C>', _text_copy)
+        def _text_paste(e):
+            try:
+                w = e.widget
+                text = w.clipboard_get()
+                if w.tag_ranges('sel'):
+                    w.delete('sel.first', 'sel.last')
+                w.insert('insert', text)
+            except:
+                pass
+            return 'break'
+
+        def _text_cut(e):
+            try:
+                w = e.widget
+                if w.tag_ranges('sel'):
+                    text = w.get('sel.first', 'sel.last')
+                    w.clipboard_clear()
+                    w.clipboard_append(text)
+                    w.delete('sel.first', 'sel.last')
+            except:
+                pass
+            return 'break'
+
+        def _text_select_all(e):
+            try:
+                w = e.widget
+                w.tag_add('sel', '1.0', 'end')
+                w.mark_set('insert', 'end')
+            except:
+                pass
+            return 'break'
+
+        # Биндим на КЛАССЫ, а не на отдельные виджеты
+        self.root.bind_class('TEntry', '<Control-c>', _entry_copy)
+        self.root.bind_class('TEntry', '<Control-C>', _entry_copy)
+        self.root.bind_class('TEntry', '<Control-v>', _entry_paste)
+        self.root.bind_class('TEntry', '<Control-V>', _entry_paste)
+        self.root.bind_class('TEntry', '<Control-x>', _entry_cut)
+        self.root.bind_class('TEntry', '<Control-X>', _entry_cut)
+        self.root.bind_class('TEntry', '<Control-a>', _entry_select_all)
+        self.root.bind_class('TEntry', '<Control-A>', _entry_select_all)
+
+        self.root.bind_class('TCombobox', '<Control-c>', _entry_copy)
+        self.root.bind_class('TCombobox', '<Control-C>', _entry_copy)
+        self.root.bind_class('TCombobox', '<Control-v>', _entry_paste)
+        self.root.bind_class('TCombobox', '<Control-V>', _entry_paste)
+        self.root.bind_class('TCombobox', '<Control-a>', _entry_select_all)
+        self.root.bind_class('TCombobox', '<Control-A>', _entry_select_all)
+
+        self.root.bind_class('TSpinbox', '<Control-c>', _entry_copy)
+        self.root.bind_class('TSpinbox', '<Control-C>', _entry_copy)
+        self.root.bind_class('TSpinbox', '<Control-v>', _entry_paste)
+        self.root.bind_class('TSpinbox', '<Control-V>', _entry_paste)
+        self.root.bind_class('TSpinbox', '<Control-a>', _entry_select_all)
+        self.root.bind_class('TSpinbox', '<Control-A>', _entry_select_all)
+
+        self.root.bind_class('Text', '<Control-c>', _text_copy)
+        self.root.bind_class('Text', '<Control-C>', _text_copy)
+        self.root.bind_class('Text', '<Control-v>', _text_paste)
+        self.root.bind_class('Text', '<Control-V>', _text_paste)
+        self.root.bind_class('Text', '<Control-x>', _text_cut)
+        self.root.bind_class('Text', '<Control-X>', _text_cut)
+        self.root.bind_class('Text', '<Control-a>', _text_select_all)
+        self.root.bind_class('Text', '<Control-A>', _text_select_all)
+
+        # Для Listbox
+        def _listbox_select_all(e):
+            try:
+                w = e.widget
+                w.select_set(0, 'end')
+            except:
+                pass
+            return 'break'
+
+        def _listbox_copy(e):
+            try:
+                w = e.widget
+                sel = w.curselection()
+                if sel:
+                    text = '\n'.join(w.get(i) for i in sel)
+                    w.clipboard_clear()
+                    w.clipboard_append(text)
+            except:
+                pass
+            return 'break'
+
+        self.root.bind_class('Listbox', '<Control-c>', _listbox_copy)
+        self.root.bind_class('Listbox', '<Control-C>', _listbox_copy)
+        self.root.bind_class('Listbox', '<Control-a>', _listbox_select_all)
+        self.root.bind_class('Listbox', '<Control-A>', _listbox_select_all)
 
     def _listbox_select_all(self, event=None):
         self.file_listbox.select_set(0, 'end')
@@ -1939,7 +2127,6 @@ Lossless форматы (без потерь):
 
     def _check_conflicts(self):
         warns = []
-
         if self.v_merge.get() and not self.v_extra.get().strip():
             warns.append("Merge: не указан дополнительный трек")
         if self.v_silence.get() and self.v_fade.get():
@@ -1947,43 +2134,18 @@ Lossless форматы (без потерь):
         if self.v_broken.get() and self.v_frame_sh.get():
             warns.append("Broken Duration + Frame Shift: могут сломать структуру MP3")
         if self.v_spectral_mask.get() and self.v_spec_jitter.get():
-            warns.append("Spectral Masking + Spectral Jitter: множественные провалы, возможны артефакты")
+            warns.append("Spectral Masking + Spectral Jitter: множественные провалы")
         if self.v_concert_emu.get() and self.v_midside.get():
-            warns.append("Concert Emulation + Mid/Side: оба меняют стереокартину, может быть избыточно")
-        if self.v_saturation.get() and self.v_concert_emu.get():
-            warns.append("Saturation + Concert: компрессия и искажения могут суммироваться")
+            warns.append("Concert Emulation + Mid/Side: избыточно")
         if self.v_vk_infra.get() and self.v_ultra.get():
-            warns.append("VK Инфразвук + Ultrasonic: двойная обработка вне слышимого диапазона")
+            warns.append("VK Инфразвук + Ultrasonic: двойная обработка")
         if self.v_temp_jitter.get() and (self.v_pitch.get() or self.v_speed.get()):
             warns.append("Temporal Jitter + Pitch/Speed: множественные изменения времени")
-        if self.v_resamp.get() and (self.v_pitch.get() or self.v_speed.get()):
-            warns.append("Resample Drift + Pitch/Speed: каскадные артефакты")
-        if self.v_phase_inv.get() and self.v_phase_scr.get():
-            warns.append("Phase Invert + Scramble: взаимное подавление фазы")
-        if self.v_cut.get() and self.v_trim.get():
-            warns.append("Cut + Trim: трек может стать слишком коротким")
-        if self.v_ultra.get() and self.v_dither.get():
-            warns.append("Ultrasonic + Dither: избыточный спектральный шум")
-
         try:
             if self.v_vk_infra.get() and self.v_vk_infra_amplitude.get() > 0.5:
-                warns.append(f"VK Инфразвук: амплитуда {self.v_vk_infra_amplitude.get():.2f} > 0.5 - возможен клиппинг")
-            if self.v_pitch.get() and abs(self.v_pitch_val.get()) > 5.0:
-                warns.append(f"Pitch: ±{self.v_pitch_val.get():.1f} - очень большое значение, будет слышно")
-            if self.v_speed.get():
-                spd = self.v_speed_val.get()
-                if spd < 0.90 or spd > 1.10:
-                    warns.append(f"Speed: {spd:.2f}x - может быть слышно")
-            if self.v_silence.get() and self.v_silence_val.get() > 120:
-                warns.append(f"Тишина: {self.v_silence_val.get()} сек - очень много")
-            if self.v_phase_scr.get() and self.v_phase_scr_val.get() > 4.0:
-                warns.append(f"Phase Scramble: {self.v_phase_scr_val.get()} Гц - может быть слышно")
-            if self.v_resamp.get() and abs(self.v_resamp_val.get()) > 7:
-                warns.append(f"Resample Drift: ±{abs(self.v_resamp_val.get())} Гц - может быть слышно")
+                warns.append(f"VK Инфразвук: амплитуда {self.v_vk_infra_amplitude.get():.2f} > 0.5")
             if self.v_ultra.get() and self.v_ultra_level.get() > 0.008:
-                warns.append(f"Ultrasonic level {self.v_ultra_level.get():.4f} - может быть слышно")
-            if self.v_spectral_mask.get() and self.v_spectral_mask_att.get() > 20:
-                warns.append(f"Spectral Mask: {self.v_spectral_mask_att.get()} dB - возможны артефакты")
+                warns.append(f"Ultrasonic level {self.v_ultra_level.get():.4f} - высокий")
         except tk.TclError:
             pass
 
@@ -1993,11 +2155,9 @@ Lossless форматы (без потерь):
 
     def _add_files_dialog(self):
         if self._mode == 'converter':
-            files = filedialog.askopenfilenames(title="Выберите аудиофайлы",
-                                                filetypes=INPUT_EXTENSIONS)
+            files = filedialog.askopenfilenames(title="Выберите аудиофайлы", filetypes=INPUT_EXTENSIONS)
         else:
-            files = filedialog.askopenfilenames(title="Выберите MP3 файлы",
-                                                filetypes=[("MP3 files", "*.mp3")])
+            files = filedialog.askopenfilenames(title="Выберите MP3 файлы", filetypes=[("MP3 files", "*.mp3")])
         if files:
             self._add_files(list(files))
 
@@ -2027,6 +2187,7 @@ Lossless форматы (без потерь):
             self._update_track_info(idx)
             self._load_waveform_for_file(self.input_files[idx])
             self._update_name_preview()
+            self._live_preview_template()
         else:
             self._update_track_info(-1)
             self._clear_waveforms()
@@ -2094,8 +2255,7 @@ Lossless форматы (без потерь):
         self._cover_is_temp = False
 
     def _select_cover(self):
-        fp = filedialog.askopenfilename(title="Выберите обложку",
-                                        filetypes=[("Images", "*.png *.jpg *.jpeg")])
+        fp = filedialog.askopenfilename(title="Выберите обложку", filetypes=[("Images", "*.png *.jpg *.jpeg")])
         if fp:
             self._cleanup_temp_cover()
             self.selected_cover_path = fp
@@ -2167,15 +2327,13 @@ Lossless форматы (без потерь):
             self._log(f"Папка вывода: {d}", 'success')
 
     def _select_extra_track(self):
-        fp = filedialog.askopenfilename(title="Дополнительный трек",
-                                        filetypes=INPUT_EXTENSIONS)
+        fp = filedialog.askopenfilename(title="Дополнительный трек", filetypes=INPUT_EXTENSIONS)
         if fp:
             self.v_extra.set(fp)
 
     def _save_preset(self):
         name = self.v_preset_name.get().strip() or f"Preset {len(self.saved_presets)+1}"
-        data = {'name': name, 'date': datetime.now().isoformat(),
-                'settings': self._collect_settings()}
+        data = {'name': name, 'date': datetime.now().isoformat(), 'settings': self._collect_settings()}
         self.saved_presets.append(data)
         self._refresh_preset_list()
         self.v_preset_name.set('')
@@ -2228,60 +2386,9 @@ Lossless форматы (без потерь):
         self.v_saturation.set(methods.get('saturation', False))
         self.v_temp_jitter.set(methods.get('temporal_jitter', False))
         self.v_spec_jitter.set(methods.get('spectral_jitter', False))
-        self.v_spectral_mask_sens.set(s.get('spectral_mask_sensitivity', 0.8))
-        self.v_spectral_mask_att.set(s.get('spectral_mask_attenuation', 12))
-        self.v_spectral_mask_peaks.set(s.get('spectral_mask_peaks', 10))
-        self.v_concert_intensity.set(s.get('concert_intensity', 'medium'))
-        self.v_midside_mid.set(s.get('midside_mid_gain', -3.0))
-        self.v_midside_side.set(s.get('midside_side_gain', 2.0))
-        self.v_psycho_intensity.set(s.get('psychoacoustic_intensity', 0.0003))
-        self.v_saturation_drive.set(s.get('saturation_drive', 1.5))
-        self.v_saturation_mix.set(s.get('saturation_mix', 0.15))
-        self.v_jitter_intensity.set(s.get('jitter_intensity', 0.002))
-        self.v_jitter_freq.set(s.get('jitter_frequency', 0.5))
-        self.v_spec_jitter_count.set(s.get('spectral_jitter_count', 5))
-        self.v_spec_jitter_att.set(s.get('spectral_jitter_attenuation', 15))
         self.v_vk_infra.set(methods.get('vk_infrasonic', False))
-        self.v_vk_infra_mode.set(s.get('vk_infrasonic_mode', 'modulated'))
-        self.v_vk_infra_amplitude.set(s.get('vk_infrasonic_amplitude', 0.35))
-        self.v_vk_infra_freq.set(s.get('vk_infrasonic_freq', 18.0))
-        self.v_vk_infra_mod_freq.set(s.get('vk_infrasonic_mod_freq', 0.08))
-        self.v_vk_infra_mod_depth.set(s.get('vk_infrasonic_mod_depth', 0.3))
-        self.v_vk_infra_phase_shift.set(s.get('vk_infrasonic_phase_shift', 0.0))
-        self.v_vk_infra_waveform.set(s.get('vk_infrasonic_waveform', 'sine'))
-        self.v_vk_infra_adaptive.set(s.get('vk_infrasonic_adaptive', True))
-        self.v_vk_infra_h1.set(s.get('vk_infrasonic_h1', 0.15))
-        self.v_vk_infra_h2.set(s.get('vk_infrasonic_h2', 0.07))
-        self.v_vk_infra_h3.set(s.get('vk_infrasonic_h3', 0.03))
-        self.v_pitch_val.set(s.get('pitch_value', 0.5))
-        self.v_speed_val.set(s.get('speed_value', 1.00))
-        self.v_eq_val.set(s.get('eq_value', -2.0))
-        self.v_silence_val.set(s.get('silence_duration', 45))
-        self.v_phase_inv_val.set(s.get('phase_invert_strength', 1.0))
-        self.v_phase_scr_val.set(s.get('phase_scramble_speed', 2.0))
-        self.v_dc_val.set(s.get('dc_shift_value', 0.000005))
-        self.v_resamp_val.set(s.get('resample_drift_amount', 1))
-        self.v_ultra_freq.set(s.get('ultrasonic_freq', 21000))
-        self.v_ultra_level.set(s.get('ultrasonic_level', 0.001))
-        self.v_haas_val.set(s.get('haas_delay_ms', 15.0))
-        self.v_dither_method.set(s.get('dither_method', 'triangular_hp'))
-        self.v_id3pad_val.set(s.get('id3_padding_bytes', 512))
-        self.v_trim_val.set(s.get('trim_duration', 5.0))
-        self.v_cut_pos.set(s.get('cut_position_percent', 50))
-        self.v_cut_dur.set(s.get('cut_duration', 2.0))
-        self.v_fade_val.set(s.get('fade_duration', 5.0))
-        if hasattr(self, 'cmb_eq_type'):
-            self.cmb_eq_type.current(s.get('eq_type', 0))
-        if hasattr(self, 'cmb_broken'):
-            self.cmb_broken.current(s.get('broken_type', 0))
-        _Q_DISPLAY = {
-            '320k': '320 kbps (CBR)',
-            '0':    '245 kbps (VBR Q0)',
-            '4':    '175 kbps (VBR Q4)',
-            '6':    '130 kbps (VBR Q6)',
-        }
-        self.v_quality.set(_Q_DISPLAY.get(str(s.get('quality', '0')), '245 kbps (VBR Q0)'))
-
+        
+        self.v_filename_template.set(s.get('filename_template', 'VK_{n:03d}_custom'))
         self._check_conflicts()
         self._log(f"Загружен пресет: {data['name']}", 'success')
 
@@ -2296,8 +2403,7 @@ Lossless форматы (без потерь):
         self._log(f"Пресет '{name}' удалён", 'warning')
 
     def _export_preset(self):
-        fp = filedialog.asksaveasfilename(defaultextension='.json',
-                                          filetypes=[("JSON", "*.json")])
+        fp = filedialog.asksaveasfilename(defaultextension='.json', filetypes=[("JSON", "*.json")])
         if fp:
             try:
                 with open(fp, 'w', encoding='utf-8') as f:
@@ -2355,60 +2461,8 @@ Lossless форматы (без потерь):
                 'spectral_jitter': self.v_spec_jitter.get(),
                 'vk_infrasonic': self.v_vk_infra.get(),
             },
-            'pitch_value':          self.v_pitch_val.get(),
-            'speed_value':          self.v_speed_val.get(),
-            'eq_value':             self.v_eq_val.get(),
-            'eq_type':              eq_type_idx,
-            'silence_duration':     self.v_silence_val.get(),
-            'phase_invert_strength':self.v_phase_inv_val.get(),
-            'phase_scramble_speed': self.v_phase_scr_val.get(),
-            'dc_shift_value':       self.v_dc_val.get(),
-            'resample_drift_amount':self.v_resamp_val.get(),
-            'ultrasonic_freq':      self.v_ultra_freq.get(),
-            'ultrasonic_level':     self.v_ultra_level.get(),
-            'haas_delay_ms':        self.v_haas_val.get(),
-            'dither_method':        self.v_dither_method.get(),
-            'id3_padding_bytes':    self.v_id3pad_val.get(),
-            'trim_duration':        self.v_trim_val.get(),
-            'cut_position_percent': self.v_cut_pos.get(),
-            'cut_duration':         self.v_cut_dur.get(),
-            'fade_duration':        self.v_fade_val.get(),
-            'extra_track_path':     self.v_extra.get(),
-            'broken_type':          broken_type_idx,
-            'spectral_mask_sensitivity': self.v_spectral_mask_sens.get(),
-            'spectral_mask_attenuation': self.v_spectral_mask_att.get(),
-            'spectral_mask_peaks':       self.v_spectral_mask_peaks.get(),
-            'concert_intensity':         self.v_concert_intensity.get(),
-            'midside_mid_gain':          self.v_midside_mid.get(),
-            'midside_side_gain':         self.v_midside_side.get(),
-            'psychoacoustic_intensity':  self.v_psycho_intensity.get(),
-            'saturation_drive':          self.v_saturation_drive.get(),
-            'saturation_mix':            self.v_saturation_mix.get(),
-            'jitter_intensity':          self.v_jitter_intensity.get(),
-            'jitter_frequency':          self.v_jitter_freq.get(),
-            'spectral_jitter_count':     self.v_spec_jitter_count.get(),
-            'spectral_jitter_attenuation': self.v_spec_jitter_att.get(),
-            'vk_infrasonic_mode':        self.v_vk_infra_mode.get(),
-            'vk_infrasonic_amplitude':   self.v_vk_infra_amplitude.get(),
-            'vk_infrasonic_freq':        self.v_vk_infra_freq.get(),
-            'vk_infrasonic_mod_freq':    self.v_vk_infra_mod_freq.get(),
-            'vk_infrasonic_mod_depth':   self.v_vk_infra_mod_depth.get(),
-            'vk_infrasonic_phase_shift': self.v_vk_infra_phase_shift.get(),
-            'vk_infrasonic_waveform':    self.v_vk_infra_waveform.get(),
-            'vk_infrasonic_adaptive':    self.v_vk_infra_adaptive.get(),
-            'vk_infrasonic_h1':          self.v_vk_infra_h1.get(),
-            'vk_infrasonic_h2':          self.v_vk_infra_h2.get(),
-            'vk_infrasonic_h3':          self.v_vk_infra_h3.get(),
-            'selected_cover_path':  self.selected_cover_path,
-            'quality':              quality_map[q_idx],
-            'preserve_metadata':    self.v_preserve_meta.get(),
-            'preserve_cover':       self.v_preserve_cover.get(),
-            'rename_files':         False,
-            'delete_original':      self.v_delete_orig.get(),
-            'reupload':             self.v_reupload.get(),
-            'reupload_text':        self.v_reupload_text.get(),
-            'reupload_pos':         self.v_reupload_pos.get(),
-            'filename_template':    self.v_filename_template.get() or 'VK_{n:03d}_custom',
+            'filename_template': self.v_filename_template.get() or 'VK_{n:03d}_custom',
+            'quality': quality_map[q_idx],
         }
 
     def _start(self):
@@ -2498,14 +2552,26 @@ Lossless форматы (без потерь):
                     cfg = json.load(f)
                 self.output_dir = cfg.get('output_dir', self.output_dir) or self.output_dir
                 self.saved_presets = cfg.get('presets', [])
+                self.user_templates = cfg.get('user_templates', [])
+                if not self.user_templates:
+                    self.user_templates = [
+                        {'name': f'Default {i+1}', 'pattern': p}
+                        for i, p in enumerate(DEFAULT_TEMPLATES)
+                    ]
         except:
-            pass
+            self.user_templates = [
+                {'name': f'Default {i+1}', 'pattern': p}
+                for i, p in enumerate(DEFAULT_TEMPLATES)
+            ]
 
     def _save_config(self):
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump({'output_dir': self.output_dir, 'presets': self.saved_presets},
-                          f, indent=2, ensure_ascii=False)
+                json.dump({
+                    'output_dir': self.output_dir,
+                    'presets': self.saved_presets,
+                    'user_templates': self.user_templates,
+                }, f, indent=2, ensure_ascii=False)
         except:
             pass
 
@@ -2522,6 +2588,22 @@ Lossless форматы (без потерь):
             self.log_text.insert('end', f"[{ts}] {message}\n", level)
             self.log_text.see('end')
             self.log_text.config(state='disabled')
+
+    def _method_row(self, parent, row, text, var, *extra_widgets):
+        cb = ttk.Checkbutton(parent, text=text, variable=var, command=self._check_conflicts)
+        cb.grid(row=row, column=0, sticky='w', padx=4, pady=2)
+        for col, w in enumerate(extra_widgets, start=1):
+            w.grid(row=row, column=col, padx=4, pady=2, sticky='w')
+        return cb
+
+    def _spin(self, parent, var, from_, to, inc, width=8, fmt='%.2f'):
+        sb = ttk.Spinbox(parent, textvariable=var, from_=from_, to=to,
+                         increment=inc, width=width, format=fmt if isinstance(var, tk.DoubleVar) else None)
+        return sb
+
+    def _desc(self, parent, row, col, text, colspan=4):
+        ttk.Label(parent, text=text, foreground='gray', font=('', 8, 'italic')
+                  ).grid(row=row, column=col, columnspan=colspan, sticky='w', padx=22, pady=(0, 3))
 
 
 class BatchProcessor:
@@ -2713,12 +2795,7 @@ def _compute_preview_static(samples, s):
     if s.get('eq', False):
         eq_type = s.get('eq_type', 0)
         eq_val = s.get('eq_val', -2.0)
-        if eq_type == 1:
-            gain = 10 ** (-4 / 20)
-        elif eq_type == 2:
-            gain = 10 ** (3 / 20)
-        else:
-            gain = 10 ** (eq_val / 20)
+        gain = 10 ** (eq_val / 20)
         result = [v * gain for v in result]
 
     if s.get('saturation', False):
@@ -2774,13 +2851,6 @@ def _compute_preview_static(samples, s):
         result2 = list(result)
         for i in range(echo_d, n):
             result2[i] += result[i - echo_d] * echo_g
-        thresh = {'light': 0.7, 'medium': 0.55, 'heavy': 0.40}.get(intensity, 0.55)
-        for i in range(n):
-            v = result2[i]
-            if abs(v) > thresh:
-                excess = abs(v) - thresh
-                v = math.copysign(thresh + excess * 0.25, v)
-            result2[i] = v
         result = result2
 
     if s.get('midside', False):
