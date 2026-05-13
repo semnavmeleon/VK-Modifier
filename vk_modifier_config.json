@@ -1,0 +1,88 @@
+{
+  "output_dir": "E:/перезаливыИСХОДНИКИ/S.C.P_/2014 - Создано из ничего/обработано",
+  "presets": [
+    {
+      "name": "sadsadsadadasdada",
+      "date": "2026-05-02T22:44:26.098304",
+      "settings": {
+        "methods": {
+          "pitch": false,
+          "speed": false,
+          "eq": false,
+          "silence": false,
+          "phase_invert": false,
+          "phase_scramble": false,
+          "dc_shift": false,
+          "resample_drift": false,
+          "ultrasonic_noise": false,
+          "haas_delay": false,
+          "dither_attack": false,
+          "id3_padding_attack": false,
+          "trim_silence": false,
+          "cut_fragment": false,
+          "fade_out": false,
+          "merge": false,
+          "broken_duration": true,
+          "bitrate_jitter": false,
+          "frame_shift": false,
+          "fake_metadata": true,
+          "reorder_tags": true,
+          "spectral_masking": false,
+          "concert_emulation": false,
+          "midside_processing": false,
+          "psychoacoustic_noise": false,
+          "saturation": false,
+          "temporal_jitter": false,
+          "spectral_jitter": false,
+          "vk_infrasonic": false
+        },
+        "filename_template": "VK_{n:03d}_custom",
+        "quality": "320k",
+        "rename_files": true,
+        "preserve_metadata": false
+      }
+    }
+  ],
+  "user_templates": [
+    {
+      "name": "Default 1",
+      "pattern": "VK_{n:03d}_custom"
+    },
+    {
+      "name": "Default 2",
+      "pattern": "modified_{original}"
+    },
+    {
+      "name": "Default 3",
+      "pattern": "{artist} - {title}"
+    },
+    {
+      "name": "Default 4",
+      "pattern": "{title}"
+    },
+    {
+      "name": "Default 5",
+      "pattern": "{original}"
+    },
+    {
+      "name": "Default 6",
+      "pattern": "{n:03d} - {artist} - {title}"
+    },
+    {
+      "name": "Default 7",
+      "pattern": "{artist} - {album} - {n:02d} - {title}"
+    },
+    {
+      "name": "Default 8",
+      "pattern": "{year} - {artist} - {title}"
+    },
+    {
+      "name": "Default 9",
+      "pattern": "[VK] {title}"
+    },
+    {
+      "name": "Default 10",
+      "pattern": "{title} (modified)"
+    }
+  ]
+}
