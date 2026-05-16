@@ -17,7 +17,7 @@
 
 ### Что скачать
 
-С Яндекс Диска скачать файл [VK_Modifier.exe]([VK_Modifier.exe — Яндекс Диск](https://disk.yandex.ru/d/oVuTmyMHUvy7UA)).
+С Яндекс Диска скачать файл [VK_Modifier.exe](https://disk.yandex.ru/d/oVuTmyMHUvy7UA).
 
 ### Запуск
 
