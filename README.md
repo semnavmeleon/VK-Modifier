@@ -10,7 +10,7 @@
 
 Программа доступна в двух вариантах:
 
-- **Готовый EXE** — скачать `VK_Modifier.exe` с Яндекс Диска и запустить. FFmpeg встроен, ничего дополнительно устанавливать не нужно. Только Windows 64-bit.
+- **Готовый EXE** — скачать `VK_Modifier.exe` и запустить. FFmpeg встроен, ничего дополнительно устанавливать не нужно. Только Windows 64-bit.
 - **Из исходников** — требует Python, FFmpeg и установки библиотек. Работает на Windows, Linux, macOS.
 
 ---
@@ -19,7 +19,7 @@
 
 ### Что скачать
 
-С Яндекс Диска скачать файл [VK_Modifier.exe](https://disk.yandex.ru/d/tj9cA6dQUl6Gkw).
+Релиз версия скачать файл [VK_Modifier.exe](https://github.com/semnavmeleon/VK-Modifier/releases/tag/v1.1.0).
 
 ### Запуск
 
