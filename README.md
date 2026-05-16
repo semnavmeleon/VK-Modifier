@@ -432,16 +432,6 @@ https://vk.com/reuploadunder
 
 [RU](#vk-modifier) | [EN](#english-summary)
 
-# VK Modifier
-
-... (весь ваш текущий русский контент от "Инструмент пакетной обработки" до "Наша группа ВК") ...
-
-## Дисклеймер
-
-... (русский текст дисклеймера) ...
-
----
-
 ## English Summary
 
 Batch audio processing tool that modifies the acoustic and structural properties of audio files to interfere with automated fingerprint recognition systems. Processing intensity is adjustable to maintain perceptual audio quality. Built with FFmpeg and PyQt6.
