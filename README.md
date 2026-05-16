@@ -2,7 +2,7 @@
 
 Инструмент пакетной обработки аудиофайлов. Изменяет цифровую структуру файлов для противодействия автоматическому распознаванию отпечатков — при этом звук на слух может оставаться практически неизменным в зависимости от выбранной агрессивности обработки. Работает через FFmpeg, интерфейс на PyQt6.
 
-<img width="1919" height="1039" alt="Screenshot_1 pngвфывфывфыв png png" src="https://github.com/user-attachments/assets/95a0f026-0312-46ac-87cc-a8e6d86527d2" />
+<img width="1919" height="1035" alt="выфвфывфывф" src="https://github.com/user-attachments/assets/0b672669-cbfa-4a9e-b284-bae9be24b2ba" />
 
 ---
 
@@ -19,7 +19,7 @@
 
 ### Что скачать
 
-С Яндекс Диска скачать файл [VK_Modifier.exe](https://disk.yandex.ru/d/M26Wnb0g2XbzFQ).
+С Яндекс Диска скачать файл [VK_Modifier.exe](https://disk.yandex.ru/d/tj9cA6dQUl6Gkw).
 
 ### Запуск
 
