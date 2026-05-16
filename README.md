@@ -21,7 +21,7 @@
 
 ### Что скачать
 
-Релиз версия скачать файл [VK_Modifier.exe](https://github.com/semnavmeleon/VK-Modifier/releases/tag/v1.1.0).
+Релиз версия скачать файл [VK_Modifier.exe](https://github.com/semnavmeleon/VK-Modifier/releases).
 
 ### Запуск
 
