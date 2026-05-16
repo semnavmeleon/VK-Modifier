@@ -3,6 +3,12 @@
 
 import os
 import sys
+
+# When running from a PyInstaller --onefile bundle, binaries land in sys._MEIPASS.
+# Prepend that directory to PATH so ffmpeg/ffprobe are found without system install.
+if getattr(sys, "frozen", False):
+    _bundle_dir = sys._MEIPASS
+    os.environ["PATH"] = _bundle_dir + os.pathsep + os.environ.get("PATH", "")
 import json
 import queue
 import random
@@ -1453,6 +1459,7 @@ class SystemTab(QWidget):
 
 class NamesTab(QWidget):
     preset_deleted = pyqtSignal()
+    preset_saved   = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1593,10 +1600,6 @@ class WaveformViewer(QWidget):
             ih.addWidget(lbl)
         ih.addStretch()
 
-        self.btn_clear_after = QPushButton("Сбросить «после»")
-        self.btn_clear_after.setFixedWidth(130)
-        self.btn_clear_after.clicked.connect(self._clear_after)
-        ih.addWidget(self.btn_clear_after)
         lay.addWidget(info_row)
 
     def show_before(self, filepath: str):
@@ -1675,7 +1678,6 @@ class WaveformViewer(QWidget):
             pass
 
     def set_loading(self, loading: bool):
-        self.btn_clear_after.setEnabled(not loading)
         if loading:
             self.lbl_after.setText("Обработка…")
         elif self.lbl_after.text() == "Обработка…":
@@ -1758,6 +1760,31 @@ class ModifierPanel(QWidget):
         th.addWidget(self.metadata, 1)
         th.addWidget(self.track_info)
         lay.addWidget(top_row)
+
+        # Preset bar — always visible above tabs
+        preset_bar = QWidget()
+        pb = QHBoxLayout(preset_bar)
+        pb.setContentsMargins(0, 2, 0, 2)
+        pb.setSpacing(6)
+        pb.addWidget(QLabel("Пресет:"))
+        self.cmb_presets = QComboBox()
+        self.cmb_presets.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.cmb_presets.setPlaceholderText("(не выбран)")
+        pb.addWidget(self.cmb_presets, 1)
+        btn_preset_save = QPushButton("Сохранить")
+        btn_preset_save.setFixedWidth(90)
+        btn_preset_save.clicked.connect(self._save_preset)
+        btn_preset_load = QPushButton("Загрузить")
+        btn_preset_load.setFixedWidth(90)
+        btn_preset_load.clicked.connect(self._load_preset_from_bar)
+        btn_preset_del = QPushButton("Удалить")
+        btn_preset_del.setFixedWidth(80)
+        btn_preset_del.clicked.connect(self._del_preset_from_bar)
+        pb.addWidget(btn_preset_save)
+        pb.addWidget(btn_preset_load)
+        pb.addWidget(btn_preset_del)
+        lay.addWidget(preset_bar)
+        lay.addWidget(_hline())
 
         # Tabs
         self.tabs = QTabWidget()
@@ -1858,7 +1885,7 @@ class ModifierPanel(QWidget):
         # Auto-preview: re-run 900 ms after the last setting change
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(900)
+        self._preview_timer.setInterval(0)
         self._preview_timer.timeout.connect(self._on_preview_requested)
         self._connect_settings_signals(self.tabs)
 
@@ -1876,6 +1903,15 @@ class ModifierPanel(QWidget):
             else:
                 subprocess.Popen(["xdg-open", d])
 
+    def _refresh_preset_bar(self):
+        current = self.cmb_presets.currentText()
+        self.cmb_presets.clear()
+        for p in self._presets:
+            self.cmb_presets.addItem(p.get("name", "Без имени"))
+        idx = self.cmb_presets.findText(current)
+        if idx >= 0:
+            self.cmb_presets.setCurrentIndex(idx)
+
     def _save_preset(self):
         from PyQt6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Сохранить пресет", "Имя пресета:")
@@ -1883,12 +1919,28 @@ class ModifierPanel(QWidget):
             cfg = self.collect_all_settings()
             cfg["name"] = name
             self._presets.append(cfg)
+            self._refresh_preset_bar()
+            self.cmb_presets.setCurrentIndex(len(self._presets) - 1)
             self.names_tab.refresh_presets(self._presets)
+            self.names_tab.preset_saved.emit()
+
+    def _load_preset_from_bar(self):
+        idx = self.cmb_presets.currentIndex()
+        if 0 <= idx < len(self._presets):
+            self.restore_all_settings(self._presets[idx])
 
     def _load_preset(self):
         p = self.names_tab.get_selected_preset()
         if p:
             self.restore_all_settings(p)
+
+    def _del_preset_from_bar(self):
+        idx = self.cmb_presets.currentIndex()
+        if 0 <= idx < len(self._presets):
+            self._presets.pop(idx)
+            self._refresh_preset_bar()
+            self.names_tab.refresh_presets(self._presets)
+            self.names_tab.preset_deleted.emit()
 
     def _connect_settings_signals(self, root: QWidget):
         # Only signal-trigger preview from tabs whose settings actually affect audio output.
@@ -2103,6 +2155,7 @@ class ModifierPanel(QWidget):
             self.lbl_out_dir.setText(self._output_dir)
         if d.get("_presets"):
             self._presets = d["_presets"]
+            self._refresh_preset_bar()
             self.names_tab.refresh_presets(self._presets)
 
 
@@ -2277,6 +2330,7 @@ class MainWindow(QMainWindow):
         self.modifier_panel.preview_requested.connect(self._start_preview)
         self.converter_panel.start_requested.connect(self._start_converter)
         self.modifier_panel.names_tab.preset_deleted.connect(self._save_config)
+        self.modifier_panel.names_tab.preset_saved.connect(self._save_config)
 
         # Status bar
         self._status = self.statusBar()

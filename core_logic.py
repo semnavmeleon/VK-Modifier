@@ -776,6 +776,10 @@ class ModificationWorker(threading.Thread):
                         album=self._safe_filename(ex_album),
                         year=self._safe_filename(str(ex_year)),
                     ) + '.mp3'
+                    # Sanitize the full filename: literal parts of the template
+                    # (e.g. "[vk.com/reuploadunder]") may contain slashes or
+                    # other chars invalid in Windows paths.
+                    output_filename = re.sub(r'[\\/*?:"<>|]', '_', output_filename)
                 except (KeyError, ValueError, IndexError):
                     output_filename = f"VK_{i+1:03d}_custom.mp3"
 
