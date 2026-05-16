@@ -10,6 +10,7 @@ import re
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
+from mutagen import File as MutagenFile
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, TCON, APIC, TLEN, TXXX, PRIV
 
@@ -21,6 +22,168 @@ FORMAT_CODECS = {
     'spx': 'libspeex', 'amr': 'libopencore_amrnb', 'au': 'pcm_s16be',
     'mka': 'libvorbis', 'oga': 'flac', 'caf': 'pcm_s16le', 'shn': 'shorten',
 }
+
+_RANDOM_TITLES = [
+    "очень красивый треугольный мальчик",
+    "Даниил Глубоких наступил на шиншиллу за это он попадет в ад",
+    "паукообразная сучила",
+    "нет нахуй это перебор",
+    "кто успел тот увидел",
+    "вскипяти ближнего своего",
+    '"хачи сплошь и рядом" (с) Алина Скрижали',
+    "кто такой мать твою Мики Рурка",
+    "скрипалей облучила радиация",
+    "выстрели в дон жуана",
+    "пингвины в бибирево",
+    "айсгергерт бежал трусцой сквозь лес",
+    "маканова опухоль",
+    "неконтролируемый гербарий",
+    "хлеб из шпица",
+    "гектор на радиоуправлении",
+    "трассировка лучей в Doodle Jump",
+    "играй в Tekken пока ноги не откажут",
+    "бурлеск на горизонте",
+    "залезь на окно и очень быстро слезь",
+    "иди вари яйца и меньше базарь ты заебал всех",
+    "советское пространство",
+    "выстрел в тимоти шаламэта из гаубицы",
+    "Блюз на блюде",
+    "ритузы людвига",
+    "тыквенный бенджамин",
+    "реверсивный грибник",
+    "король синегузлый",
+    "привет ребят",
+    "здоров пацантрэ",
+    "кастрированный хопкинс",
+    "метай копье в лану дель рэй",
+    "аквамэн на выгуле",
+    "спустил с поводка пенилопу",
+    "клубняк про мать",
+    "убил тома круза киянкой",
+    "непосредственно в пиздецах",
+    "ногайцы флексят",
+    "натяжное небо",
+    "нейтрализация марджанджи",
+    "я в хлеву)",
+    "беззащитный мангал",
+    "видео - компиляция где оленя подсбили",
+    "пожалуйста намочи манту",
+    "нет не верь ей намочи манту",
+    "не сиди вконтакте это гиблое дело",
+    "душа вышла из пираньи",
+    "призрак пираньи",
+    "возведи в степень ближнего своего",
+    "стреляй в плесень из дробовика",
+    "Арнэлла Маргания стреляет из пушки ядрами",
+    "играй в бадминтон - но не проеби валанчик",
+    "Аслан на сигвее катается",
+    "пицца со вкусом живой лошади",
+    "не родись скотиной",
+    "торговал ядом",
+    "педерасты едят греческий салат",
+    "Эштон Ветлугин. Все о саморазвитии и бизнесе.",
+    'если вы живете в сибири, но у вас фамилия не "пингвинюк" - вы не живете в сибири.',
+    "кулаки марьяны",
+    "я загадал жестко попиздиться с кенгуру в рукопашном боб",
+    "боб)",
+    "вокруг степана",
+    "никита по - флотски",
+    "эбола в варенике",
+    "матвей в бутылке",
+    "Ебическая сила трения",
+    "Скуф мирового значения",
+    "Щипач ануса",
+    "Подруга пенисной вены",
+    "Анти минетная установка",
+    "СЕКСНЕИЗБЕЖЕН",
+    "мэр пизды",
+    "содомия в детдоме",
+    "Адмирал Куни",
+    "СильвестрСтраппоне",
+    "Вагинальный Архитектор",
+    "Повелитель Клитора",
+    "Вагинальный террорист",
+    "Генерал Членосос",
+    "Мастурбатор-джедай",
+    "Властелин ануса",
+    "Трахальщик гусей",
+    "Королева Менструаций",
+    "Дрочила-убийца",
+    "ДрочилаВторогоШанса",
+    "Лякурва де блядье",
+    "Одухворитель плоти",
+    "Узурпатор семени",
+    "Вагинальные опарыши",
+    "Мраморный минет",
+    "Анальный кариес",
+    "Анальный тромбоз",
+    "Сифилис в бикини",
+    "Царь-геморой",
+    "Гнойный пирожок",
+    "Император простатита",
+    "Кишечные опилки",
+    "Кишечные опарыши",
+    "Боярин белых выделений",
+    "Легионер лобкового тифа",
+    "Крипто-герпес",
+    "Трипперный бард",
+    "БКБезКонтрацепции",
+    "Опричник гонорейный",
+    "Херсонский арбуз",
+    "ГазмясОМСК",
+    "КозийКИЗЯК",
+    "ЕВРЕЙтор",
+    "СионскийБратокВКепке",
+    "ГопакНаПоловинку",
+    "ЧумацкийШлях",
+    "Реквием по Чечне",
+    "ГенКуколда",
+    "Корней Педофил",
+    "АнальныйФилософ",
+    "АрбузныйТерапевт",
+    "ЕврейскийДроид",
+    "ГуруКуколдов",
+    "Спермотозоид возмездия",
+    "Отчиназес",
+    "Пашацераптор",
+    "ДикПиковая Дама",
+    "Сквиртонит",
+    "Ким Член мыл",
+    "Глиномесси",
+    "Анальдо",
+    "Господин Сасун",
+    "Дикпиковый валет",
+    "Призрак шептуна",
+    "Шестнадцати клапанное уебище",
+    "Горилкофил",
+    "Пиздюльтерьер",
+    "Аркадий передозов",
+    "ПИЗДАГЛАЗЫЙ МОНГОЛ",
+    "Крымнашёл",
+    "Донбасский Борщ",
+    "Чебурашка-Сепаратист",
+    "Узбекский Пловец",
+    "Дрочер Нации",
+    "Орден Дрочилы",
+    "Запорный Богатырь",
+    "Крымский копрофил",
+    "Некрофил оптимист",
+    "Святая сперма",
+    "Проказа в пельменях",
+    "Бздюх всемогущий",
+    "Инквизитор импотенции",
+    "хуямайнер",
+    "карлик кадырьявый",
+    "пиздатый шмель",
+    "Скурившийся скоробей",
+    "хер победивший",
+    "Минетчик с причудами",
+    "Витязь вшивый",
+    "Граф гнилозубов",
+    "Серёга Заикалов",
+    "Никита по вызову",
+    "Никита пофлотский",
+]
 
 
 class TrackInfo:
@@ -43,19 +206,29 @@ class TrackInfo:
 
     def _load_metadata(self):
         try:
-            audio = MP3(self.file_path)
-            self.duration_sec = audio.info.length
-            self.bitrate = audio.info.bitrate // 1000
-            self.sample_rate = audio.info.sample_rate
+            f = MutagenFile(self.file_path)
+            if f and hasattr(f, 'info'):
+                if hasattr(f.info, 'length'):
+                    self.duration_sec = f.info.length
+                if hasattr(f.info, 'bitrate'):
+                    self.bitrate = f.info.bitrate // 1000
+                if hasattr(f.info, 'sample_rate'):
+                    self.sample_rate = f.info.sample_rate
         except Exception:
             pass
         try:
+            f = MutagenFile(self.file_path, easy=True)
+            if f:
+                self.title  = (f.get('title',  ['']) or [''])[0]
+                self.artist = (f.get('artist', ['']) or [''])[0]
+                self.album  = (f.get('album',  ['']) or [''])[0]
+                self.year   = (f.get('date',   ['']) or [''])[0]
+                self.genre  = (f.get('genre',  ['']) or [''])[0]
+        except Exception:
+            pass
+        # Cover art — MP3/ID3
+        try:
             tags = ID3(self.file_path)
-            self.title = str(tags.get('TIT2', ''))
-            self.artist = str(tags.get('TPE1', ''))
-            self.album = str(tags.get('TALB', ''))
-            self.year = str(tags.get('TDRC', ''))
-            self.genre = str(tags.get('TCON', ''))
             for key in tags:
                 if key.startswith('APIC'):
                     self.cover_data = tags[key].data
@@ -63,6 +236,16 @@ class TrackInfo:
                     break
         except Exception:
             pass
+        # Cover art — FLAC
+        if not self.cover_data:
+            try:
+                from mutagen.flac import FLAC
+                flac = FLAC(self.file_path)
+                if flac.pictures:
+                    self.cover_data = flac.pictures[0].data
+                    self.cover_mime = flac.pictures[0].mime_type
+            except Exception:
+                pass
 
 
 class BatchProcessor:
@@ -263,6 +446,22 @@ class ModificationWorker(threading.Thread):
         return re.sub(r'[\\/*?:"<>|]', '_', str(s)).strip() or '_'
 
     @staticmethod
+    def _read_original_tags(file_path: str) -> dict:
+        try:
+            f = MutagenFile(file_path, easy=True)
+            if f is None:
+                return {}
+            return {
+                'title':  (f.get('title',  ['']) or [''])[0],
+                'artist': (f.get('artist', ['']) or [''])[0],
+                'album':  (f.get('album',  ['']) or [''])[0],
+                'year':   (f.get('date',   ['']) or [''])[0],
+                'genre':  (f.get('genre',  ['']) or [''])[0],
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
     def _extract_ffmpeg_error(stderr, chars=2000):
         lines = stderr.splitlines()
         error_lines = []
@@ -443,7 +642,7 @@ class ModificationWorker(threading.Thread):
             filters.append(f"treble=g={cfg['eq_high']}:f=8000:width_type=q:width=0.7")
 
         return ", ".join(filters)
-    
+
     def _build_midside_filter(self, mid_eq_gain=-3, side_eq_gain=2):
         mid_lin  = 10 ** (mid_eq_gain  / 20)
         side_lin = 10 ** (side_eq_gain / 20)
@@ -467,32 +666,32 @@ class ModificationWorker(threading.Thread):
         decay = min(0.3, intensity * 50)
         return f"aphaser=type=t:delay={delay:.2f}:decay={decay:.3f}:speed={freq_clamped:.2f}:out_gain=0.9"
 
-    def _build_spectral_jitter_filter(self, num_notches=5, max_attenuation=15, fixed_frequencies=None, 
+    def _build_spectral_jitter_filter(self, num_notches=5, max_attenuation=15, fixed_frequencies=None,
                                        fixed_attenuation=None, manual_config=None):
         filters = []
         freq_pool = [
-            120, 250, 400, 630, 800, 1200, 1600, 2000, 
+            120, 250, 400, 630, 800, 1200, 1600, 2000,
             2500, 3150, 4000, 5000, 6300, 8000, 10000, 12500
         ]
-        
+
         if manual_config is not None and manual_config.get('mode') == 'manual':
             frequencies = manual_config.get('frequencies', [])
             attenuations = manual_config.get('attenuations', [])
             widths = manual_config.get('widths', [])
             default_width = manual_config.get('fixed_width', 0.2)
-            
+
             for i, freq in enumerate(frequencies):
                 att = attenuations[i] if i < len(attenuations) else max_attenuation
                 width = widths[i] if i < len(widths) else default_width
                 filters.append(f"equalizer=f={freq}:width_type=q:width={width:.3f}:g=-{att}")
             return ", ".join(filters)
-        
+
         if fixed_frequencies is not None and len(fixed_frequencies) > 0:
             selected = fixed_frequencies
             default_width = 0.2
             if manual_config and 'fixed_width' in manual_config:
                 default_width = manual_config['fixed_width']
-                
+
             for freq in selected:
                 att = fixed_attenuation if fixed_attenuation is not None else max_attenuation
                 if manual_config and 'fixed_attenuation' in manual_config:
@@ -504,7 +703,7 @@ class ModificationWorker(threading.Thread):
             if num_notches_int <= 0:
                 return ""
             selected = random.sample(freq_pool, min(num_notches_int, len(freq_pool)))
-            
+
             for freq in selected:
                 if fixed_attenuation is not None:
                     att = fixed_attenuation
@@ -512,7 +711,7 @@ class ModificationWorker(threading.Thread):
                     att = random.uniform(max_attenuation / 2, max_attenuation)
                 q = random.uniform(1.5, 3.0)
                 filters.append(f"equalizer=f={freq}:width_type=q:width={q:.2f}:g=-{att:.1f}")
-        
+
         return ", ".join(filters)
 
     def _get_vk_infrasonic_expr(self, settings, extra_phase=0.0):
@@ -571,7 +770,7 @@ class ModificationWorker(threading.Thread):
                 expr = f"{main_term}+{harm_term}"
             else:
                 expr = main_term
-        
+
         return expr
 
     def _get_sample_rate(self, file_path):
@@ -588,8 +787,8 @@ class ModificationWorker(threading.Thread):
 
     def _get_peak_amplitude(self, file_path):
         try:
-            cmd = ['ffmpeg', '-i', file_path, 
-                '-af', 'volumedetect', 
+            cmd = ['ffmpeg', '-i', file_path,
+                '-af', 'volumedetect',
                 '-f', 'null', '-']
             success, result = self._safe_subprocess_run(cmd, "peak detect", allow_fail=True)
             if success and result and result.stderr:
@@ -609,49 +808,49 @@ class ModificationWorker(threading.Thread):
                 sensitivity = self.settings.get('spectral_mask_sensitivity', 0.8)
                 attenuation = self.settings.get('spectral_mask_attenuation', 12)
                 num_peaks = self.settings.get('spectral_mask_peaks', 10)
-                
+
                 mask_filter = self._build_spectral_mask_filter(
-                    current_input, 
+                    current_input,
                     num_peaks=num_peaks,
-                    sensitivity=sensitivity, 
+                    sensitivity=sensitivity,
                     attenuation=attenuation
                 )
                 if mask_filter:
                     filters.append(mask_filter)
-        
+
         if self.settings['methods'].get('concert_emulation', False):
             intensity = self.settings.get('concert_intensity', 'medium')
             concert_filter = self._build_concert_emulation_filter(intensity)
             if concert_filter:
                 filters.append(concert_filter)
-        
+
         if self.settings['methods'].get('midside_processing', False):
             mid_gain = self.settings.get('midside_mid_gain', -3)
             side_gain = self.settings.get('midside_side_gain', 2)
             ms_filter = self._build_midside_filter(mid_eq_gain=mid_gain, side_eq_gain=side_gain)
             if ms_filter:
                 filters.append(ms_filter)
-        
+
         if self.settings['methods'].get('psychoacoustic_noise', False):
             intensity = self.settings.get('psychoacoustic_intensity', 0.0003)
             noise_filter = self._build_psychoacoustic_noise_filter(intensity)
             if noise_filter:
                 filters.append(noise_filter)
-        
+
         if self.settings['methods'].get('saturation', False):
             drive = self.settings.get('saturation_drive', 1.5)
             mix = self.settings.get('saturation_mix', 0.15)
             sat_filter = self._build_saturation_filter(drive, mix)
             if sat_filter:
                 filters.append(sat_filter)
-        
+
         if self.settings['methods'].get('temporal_jitter', False):
             intensity = self.settings.get('jitter_intensity', 0.002)
             freq = self.settings.get('jitter_frequency', 0.5)
             jitter_filter = self._build_temporal_jitter_filter(intensity, freq)
             if jitter_filter:
                 filters.append(jitter_filter)
-        
+
         if self.settings['methods'].get('spectral_jitter', False):
             num_notches = self.settings.get('spectral_jitter_count', 5)
             att = self.settings.get('spectral_jitter_attenuation', 15)
@@ -661,7 +860,7 @@ class ModificationWorker(threading.Thread):
             spec_jitter = self._build_spectral_jitter_filter(num_notches, att, fixed_freqs, fixed_att, manual_cfg)
             if spec_jitter:
                 filters.append(spec_jitter)
-        
+
         if self.settings['methods'].get('loudnorm', False):
             target = self.settings.get('loudnorm_target', -14.0)
             filters.append(f"loudnorm=I={target:.1f}:TP=-1.5:LRA=11")
@@ -670,31 +869,31 @@ class ModificationWorker(threading.Thread):
             drift = self.settings.get('resample_drift_amount', 1)
             sr = self._get_sample_rate(current_input) if current_input else 44100
             filters.append(f"asetrate={sr + drift},aresample={sr}:resampler=soxr:precision=28")
-            
+
         if self.settings['methods'].get('dc_shift', False):
             filters.append(f"dcshift={self.settings.get('dc_shift_value', 0.000005)}")
-            
+
         if self.settings['methods'].get('phase_invert', False):
             strength = self.settings.get('phase_invert_strength', 1.0)
             filters.append(f"pan=stereo|c0=c0|c1={-strength}*c1")
-            
+
         if self.settings['methods'].get('phase_scramble', False):
             speed = self.settings.get('phase_scramble_speed', 2.0)
             filters.append(f"aphaser=type=t:delay=0.1:decay=0:speed={speed}")
-            
+
         if self.settings['methods'].get('haas_delay', False):
             delay_ms = self.settings.get('haas_delay_ms', 15.0)
             filters.append(f"adelay=0|{int(round(delay_ms))}")
-            
+
         if self.settings['methods'].get('pitch', False):
             semitones = self.settings['pitch_value']
             sr = self._get_sample_rate(current_input) if current_input else 44100
             rate = sr * (2 ** (semitones / 12))
             filters.append(f"asetrate={rate:.0f},aresample={sr}")
-            
+
         if self.settings['methods'].get('speed', False):
             filters.append(f"atempo={self.settings['speed_value']}")
-            
+
         if self.settings['methods'].get('eq', False):
             if self.settings.get('eq_type') == 1:
                 filters.append("equalizer=f=1000:width_type=o:width=2:g=-4")
@@ -703,10 +902,10 @@ class ModificationWorker(threading.Thread):
                 filters.append("equalizer=f=8000:width_type=o:width=2:g=3")
             else:
                 filters.append(f"equalizer=f=1000:width_type=o:width=2:g={-self.settings['eq_value']}")
-                
+
         if self.settings['methods'].get('silence', False):
             filters.append(f"apad=pad_dur={self.settings['silence_duration']}")
-            
+
         return ", ".join(filters) if filters else None
 
     def _temp_ext(self):
@@ -721,6 +920,375 @@ class ModificationWorker(threading.Thread):
         if file_path.endswith('.wav'):
             return os.path.exists(file_path) and os.path.getsize(file_path) > 0
         return self._verify_mp3(file_path)
+
+    # ------------------------------------------------------------------
+    # Pipeline steps extracted from run()
+    # ------------------------------------------------------------------
+
+    def _read_track_metadata(self, file_path, track_info):
+        original_name = os.path.splitext(os.path.basename(file_path))[0]
+        _need_orig = any(self.metadata.get(f'_append_{k}')
+                         for k in ('title', 'artist', 'album', 'year', 'genre'))
+        _orig_from_file = self._read_original_tags(file_path) if (
+            _need_orig or track_info is None) else {}
+
+        def _ti(key, ti_val):
+            return ti_val or _orig_from_file.get(key, '') or ''
+
+        orig = {
+            'title':  _ti('title',  track_info.title  if track_info else ''),
+            'artist': _ti('artist', track_info.artist if track_info else ''),
+            'album':  _ti('album',  track_info.album  if track_info else ''),
+            'year':   _ti('year',   str(track_info.year) if track_info else ''),
+            'genre':  _ti('genre',  track_info.genre  if track_info else ''),
+        }
+
+        def _combined(key, fallback):
+            v = self.metadata.get(key, '')
+            if v and self.metadata.get(f'_append_{key}') and fallback:
+                return fallback + v
+            return v or fallback
+
+        return {
+            'orig':      orig,
+            'ex_title':  _combined('title',  orig['title'] or original_name),
+            'ex_artist': _combined('artist', orig['artist']),
+            'ex_album':  _combined('album',  orig['album']),
+            'ex_year':   _combined('year',   orig['year']),
+        }
+
+    def _resolve_output_path(self, i, original_name, ex_title, ex_artist, ex_album, ex_year):
+        tpl = self.settings.get('filename_template', 'VK_{n:03d}_custom')
+        try:
+            output_filename = tpl.format(
+                n=self.start_index + i + 1,
+                original=self._safe_filename(original_name),
+                title=self._safe_filename(ex_title),
+                artist=self._safe_filename(ex_artist),
+                album=self._safe_filename(ex_album),
+                year=self._safe_filename(str(ex_year)),
+            ) + '.mp3'
+            output_filename = re.sub(r'[\\/*?:"<>|]', '_', output_filename)
+        except (KeyError, ValueError, IndexError):
+            output_filename = f"VK_{i+1:03d}_custom.mp3"
+
+        output_file = os.path.join(self.output_dir, output_filename)
+        base_fn = os.path.splitext(output_filename)[0]
+        col = 1
+        while os.path.exists(output_file):
+            output_filename = f"{base_fn}_{col}.mp3"
+            output_file = os.path.join(self.output_dir, output_filename)
+            col += 1
+        return output_file
+
+    def _apply_cut_fragment(self, current_input, temp_files):
+        if not self.settings['methods'].get('cut_fragment', False):
+            return current_input
+        cut_pos_percent = self.settings.get('cut_position_percent', 50)
+        cut_dur = self.settings.get('cut_duration', 2)
+        duration = self._get_duration(current_input)
+        if duration <= 0:
+            return current_input
+        cut_start = max(0, (duration * cut_pos_percent / 100) - (cut_dur / 2))
+        cut_end = min(duration, cut_start + cut_dur)
+        part1 = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        part1.close()
+        temp_files.append(part1.name)
+        part2 = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        part2.close()
+        temp_files.append(part2.name)
+        s1, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', current_input, '-t', str(cut_start)]
+            + self._temp_codec() + ['-y', part1.name], "cut part 1")
+        s2, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', current_input, '-ss', str(cut_end)]
+            + self._temp_codec() + ['-y', part2.name], "cut part 2")
+        if not (s1 and s2):
+            return current_input
+        concat_list = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        concat_list.write(f"file '{part1.name}'\nfile '{part2.name}'")
+        concat_list.close()
+        temp_files.append(concat_list.name)
+        cut_result = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        cut_result.close()
+        temp_files.append(cut_result.name)
+        sc, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list.name]
+            + self._temp_codec() + ['-y', cut_result.name], "concat parts")
+        if sc and self._verify_audio(cut_result.name):
+            return cut_result.name
+        return current_input
+
+    def _apply_trim_silence(self, current_input, temp_files):
+        if not self.settings['methods'].get('trim_silence', False):
+            return current_input
+        trim_dur = self.settings.get('trim_duration', 5)
+        threshold = self.settings.get('trim_silence_threshold', -60)
+        silence_end = 0.0
+        detect_cmd = ['ffmpeg', '-i', current_input, '-af',
+                      f'silencedetect=noise={threshold}dB:duration=0.3',
+                      '-f', 'null', '-']
+        ok, res = self._safe_subprocess_run(detect_cmd, "silence detect", allow_fail=True)
+        if ok and res and res.stderr:
+            match = re.search(r'silence_end:\s*([\d.]+)', res.stderr)
+            if match:
+                silence_end = float(match.group(1))
+        if silence_end <= 0:
+            return current_input
+        silence_end = min(silence_end, trim_dur)
+        trim_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        trim_temp.close()
+        temp_files.append(trim_temp.name)
+        success, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', current_input, '-ss', str(silence_end)]
+            + self._temp_codec() + ['-y', trim_temp.name], "trim silence")
+        if success and self._verify_audio(trim_temp.name):
+            return trim_temp.name
+        return current_input
+
+    def _apply_merge(self, current_input, temp_files):
+        if not (self.settings['methods'].get('merge', False) and self.settings.get('extra_track_path')):
+            return current_input
+        extra_track = self.settings['extra_track_path']
+        if not (os.path.exists(extra_track) and self._verify_mp3(extra_track)):
+            return current_input
+        norm1 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        norm1.close()
+        temp_files.append(norm1.name)
+        norm2 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        norm2.close()
+        temp_files.append(norm2.name)
+        s1, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', current_input, '-ar', '44100', '-ac', '2',
+             '-c:a', 'pcm_s16le', '-y', norm1.name], "normalize main")
+        s2, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', extra_track, '-ar', '44100', '-ac', '2',
+             '-c:a', 'pcm_s16le', '-y', norm2.name], "normalize extra")
+        if not (s1 and s2 and os.path.getsize(norm1.name) > 0 and os.path.getsize(norm2.name) > 0):
+            return current_input
+        concat_list = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
+        concat_list.write(f"file '{norm1.name.replace(chr(92), '/')}'\n")
+        concat_list.write(f"file '{norm2.name.replace(chr(92), '/')}'\n")
+        concat_list.close()
+        temp_files.append(concat_list.name)
+        merge_temp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+        merge_temp.close()
+        temp_files.append(merge_temp.name)
+        success, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list.name,
+             '-codec:a', 'libmp3lame', '-q:a', '2', '-y', merge_temp.name], "concat wav")
+        if success and self._verify_mp3(merge_temp.name):
+            return merge_temp.name
+        self._try_alternative_merge(current_input, extra_track, temp_files, merge_temp.name)
+        if os.path.exists(merge_temp.name) and self._verify_mp3(merge_temp.name):
+            return merge_temp.name
+        return current_input
+
+    def _apply_vk_infrasonic(self, current_input, temp_files):
+        if not self.settings['methods'].get('vk_infrasonic', False):
+            return current_input
+        duration = self._get_duration(current_input)
+        if not (duration and duration > 0):
+            return current_input
+        sample_rate = self._get_sample_rate(current_input) or 44100
+        amplitude = self.settings.get('vk_infrasonic_amplitude', 0.35)
+        if self.settings.get('vk_infrasonic_adaptive_amplitude', True):
+            peak = self._get_peak_amplitude(current_input)
+            if peak > 0:
+                headroom_factor = max(0.3, (0.98 - peak) / 0.98)
+                amplitude = amplitude * headroom_factor
+        local_vk = {**self.settings, 'vk_infrasonic_amplitude': amplitude}
+        expr_l = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.0)
+        expr_r = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.5236)
+        vk_temp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+        vk_temp.close()
+        temp_files.append(vk_temp.name)
+        fc = (
+            f"[0:a]volume=0.97[main];"
+            f"aevalsrc='{expr_l}|{expr_r}':c=stereo:s={sample_rate}[infra];"
+            f"[main][infra]amix=inputs=2:duration=first:"
+            f"dropout_transition=0:normalize=0[out]"
+        )
+        cmd_vk = [
+            'ffmpeg', '-i', current_input,
+            '-filter_complex', fc,
+            '-map', '[out]',
+            '-codec:a', 'libmp3lame', '-q:a', '2',
+            '-y', vk_temp.name
+        ]
+        success_vk, result_vk = self._safe_subprocess_run(cmd_vk, "vk infrasonic", allow_fail=False)
+        if success_vk and self._verify_mp3(vk_temp.name):
+            return vk_temp.name
+        err = self._extract_ffmpeg_error(result_vk.stderr) if result_vk else "неизвестная ошибка"
+        self.on_error(f"VK Инфразвук: не удалось применить — {err}")
+        return current_input
+
+    def _generate_ultrasonic_track(self, current_input, temp_files):
+        if not self.settings['methods'].get('ultrasonic_noise', False):
+            return None
+        ultrasonic_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        ultrasonic_temp.close()
+        temp_files.append(ultrasonic_temp.name)
+        freq = self.settings.get('ultrasonic_freq', 21000)
+        level = self.settings.get('ultrasonic_level', 0.001)
+        duration = self._get_duration(current_input)
+        if duration > 0:
+            ok_ultra, _ = self._safe_subprocess_run(
+                ['ffmpeg', '-f', 'lavfi',
+                 '-i', f'sine=frequency={freq}:sample_rate=44100:duration={duration}',
+                 '-af', f'volume={level}', '-y', ultrasonic_temp.name],
+                "ultrasonic", allow_fail=True)
+            if ok_ultra and os.path.exists(ultrasonic_temp.name) and os.path.getsize(ultrasonic_temp.name) > 0:
+                return ultrasonic_temp.name
+            if not ok_ultra:
+                self.on_error(f"Ультразвук: не удалось сгенерировать сигнал {freq} Гц")
+        return None
+
+    def _compute_filters(self, current_input):
+        filters = self._build_filters(current_input)
+        if self.settings['methods'].get('fade_out', False):
+            fade_dur = self.settings.get('fade_duration', 5)
+            duration = self._get_duration(current_input)
+            if duration > 0:
+                fade_start = max(0, duration - fade_dur)
+                fade_f = f"afade=t=out:st={fade_start}:d={fade_dur}"
+                filters = f"{filters},{fade_f}" if filters else fade_f
+        return filters
+
+    def _extract_cover(self, track_info, temp_files):
+        if self.settings.get('selected_cover_path') and os.path.exists(self.settings['selected_cover_path']):
+            return self.settings['selected_cover_path']
+        if self.settings.get('preserve_cover') and track_info and track_info.cover_data:
+            cover_ext = track_info.cover_mime.split('/')[1] if '/' in track_info.cover_mime else 'jpg'
+            cover_temp = tempfile.NamedTemporaryFile(suffix=f'.{cover_ext}', delete=False)
+            cover_temp.write(track_info.cover_data)
+            cover_temp.close()
+            temp_files.append(cover_temp.name)
+            return cover_temp.name
+        return None
+
+    def _resolve_tags(self, orig):
+        _orig_title  = orig['title']
+        _orig_artist = orig['artist']
+        _orig_album  = orig['album']
+        _orig_year   = orig['year']
+        _orig_genre  = orig['genre']
+
+        _meta_title = self.metadata.get('title', '')
+        if _meta_title:
+            if self.metadata.get('_append_title') and _orig_title:
+                title_to_use = _orig_title + _meta_title
+            else:
+                title_to_use = _meta_title
+        elif self.settings.get('rename_files', True):
+            title_to_use = f"{random.choice(_RANDOM_TITLES)} {random.randint(1, 999)}"
+        else:
+            title_to_use = _orig_title if self.settings.get('preserve_metadata') else ""
+
+        def _meta_tag(key, orig_val):
+            v = self.metadata.get(key, '')
+            if v and self.metadata.get(f'_append_{key}') and orig_val:
+                return orig_val + v
+            if v:
+                return v
+            return orig_val if self.settings.get('preserve_metadata') else ''
+
+        return {
+            'title':  title_to_use,
+            'artist': _meta_tag('artist', _orig_artist),
+            'album':  _meta_tag('album',  _orig_album),
+            'year':   _meta_tag('year',   _orig_year),
+            'genre':  _meta_tag('genre',  _orig_genre),
+        }
+
+    def _build_ffmpeg_cmd(self, current_input, ultrasonic_path, filters, cover_source_path, tags, output_file):
+        cmd = ['ffmpeg', '-i', current_input]
+        has_ultrasonic = bool(ultrasonic_path)
+
+        if has_ultrasonic:
+            cmd.extend(['-i', ultrasonic_path])
+            cover_idx = 2
+            amix = "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0"
+            fc = f"{amix}[_mixed];[_mixed]{filters}[_out]" if filters else f"{amix}[_out]"
+            if cover_source_path:
+                cmd.extend(['-i', cover_source_path])
+                cmd.extend(['-filter_complex', fc, '-map', '[_out]', '-map', f'{cover_idx}:v'])
+                if cover_source_path.lower().endswith(('.jpg', '.jpeg')):
+                    cmd.extend(['-c:v', 'copy', '-disposition:v', 'attached_pic'])
+                else:
+                    cmd.extend(['-c:v', 'mjpeg', '-q:v', '2', '-disposition:v', 'attached_pic'])
+            else:
+                cmd.extend(['-filter_complex', fc, '-map', '[_out]'])
+        else:
+            if cover_source_path:
+                cmd.extend(['-i', cover_source_path])
+                cmd.extend(['-map', '0:a', '-map', '1:v'])
+                if cover_source_path.lower().endswith(('.jpg', '.jpeg')):
+                    cmd.extend(['-c:v', 'copy', '-disposition:v', 'attached_pic'])
+                else:
+                    cmd.extend(['-c:v', 'mjpeg', '-q:v', '2', '-disposition:v', 'attached_pic'])
+            else:
+                cmd.extend(['-map', '0:a'])
+            if filters:
+                cmd.extend(['-af', filters])
+
+        if tags['title']:
+            cmd.extend(['-metadata', f"title={tags['title']}"])
+        if tags['artist']:
+            cmd.extend(['-metadata', f"artist={tags['artist']}"])
+        if tags['album']:
+            cmd.extend(['-metadata', f"album={tags['album']}"])
+        if tags['year']:
+            cmd.extend(['-metadata', f"date={tags['year']}"])
+        if tags['genre']:
+            cmd.extend(['-metadata', f"genre={tags['genre']}"])
+
+        if self.settings['methods'].get('fake_metadata', False):
+            fake_text = ''.join(random.choices(
+                'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                k=random.randint(100, 500)))
+            cmd.extend(['-metadata', f'comment={fake_text}'])
+
+        if self.settings['methods'].get('bitrate_jitter', False):
+            bitrate = random.choice([192, 224, 256, 320])
+            cmd.extend(['-codec:a', 'libmp3lame', '-b:a', f'{bitrate}k'])
+        else:
+            quality = self.settings.get('quality', '0')
+            if str(quality).endswith('k'):
+                cmd.extend(['-codec:a', 'libmp3lame', '-b:a', str(quality)])
+            else:
+                cmd.extend(['-codec:a', 'libmp3lame', '-q:a', str(quality)])
+
+        if self.settings['methods'].get('dither_attack', False):
+            dither = self.settings.get('dither_method', 'triangular_hp')
+            cmd.extend(['-dither_method', dither])
+
+        if self.settings['methods'].get('frame_shift', False):
+            cmd.extend(['-write_xing', '0'])
+
+        cmd.extend(['-id3v2_version', '3', '-y', output_file])
+        return cmd
+
+    def _apply_post_processing(self, output_file):
+        if self.settings['methods'].get('id3_padding_attack', False):
+            try:
+                self._apply_id3_padding_attack(output_file, self.settings.get('id3_padding_bytes', 512))
+            except Exception as e:
+                self.on_error(f"ID3 Padding Attack: {e}")
+        if self.settings['methods'].get('reorder_tags', False):
+            try:
+                self._reorder_id3_tags(output_file)
+            except Exception as e:
+                self.on_error(f"Reorder Tags: {e}")
+        if self.settings['methods'].get('broken_duration', False):
+            try:
+                self._apply_broken_duration(output_file, self.settings.get('broken_type', 0))
+            except Exception as e:
+                self.on_error(f"Broken Duration: {e}")
+
+    # ------------------------------------------------------------------
+    # Main processing loop
+    # ------------------------------------------------------------------
 
     def run(self):
         success_count = 0
@@ -741,310 +1309,32 @@ class ModificationWorker(threading.Thread):
                     continue
 
                 original_name = os.path.splitext(os.path.basename(file_path))[0]
-                tpl = self.settings.get('filename_template', 'VK_{n:03d}_custom')
-                ex_title  = self.metadata.get('title')  or (track_info.title if track_info else original_name)
-                ex_artist = self.metadata.get('artist') or (track_info.artist if track_info else '')
-                ex_album  = self.metadata.get('album')  or (track_info.album if track_info else '')
-                ex_year   = self.metadata.get('year')   or (track_info.year if track_info else '')
-                try:
-                    output_filename = tpl.format(
-                        n=self.start_index + i + 1,
-                        original=self._safe_filename(original_name),
-                        title=self._safe_filename(ex_title),
-                        artist=self._safe_filename(ex_artist),
-                        album=self._safe_filename(ex_album),
-                        year=self._safe_filename(str(ex_year)),
-                    ) + '.mp3'
-                    output_filename = re.sub(r'[\\/*?:"<>|]', '_', output_filename)
-                except (KeyError, ValueError, IndexError):
-                    output_filename = f"VK_{i+1:03d}_custom.mp3"
+                meta = self._read_track_metadata(file_path, track_info)
+                output_file = self._resolve_output_path(
+                    i, original_name,
+                    meta['ex_title'], meta['ex_artist'], meta['ex_album'], meta['ex_year'])
 
-                output_file = os.path.join(self.output_dir, output_filename)
-
-                if self.settings['methods'].get('cut_fragment', False):
-                    cut_pos_percent = self.settings.get('cut_position_percent', 50)
-                    cut_dur = self.settings.get('cut_duration', 2)
-                    duration = self._get_duration(current_input)
-                    if duration > 0:
-                        cut_start = max(0, (duration * cut_pos_percent / 100) - (cut_dur / 2))
-                        cut_end = min(duration, cut_start + cut_dur)
-
-                        part1 = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
-                        part1.close()
-                        temp_files.append(part1.name)
-                        part2 = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
-                        part2.close()
-                        temp_files.append(part2.name)
-
-                        s1, _ = self._safe_subprocess_run(
-                            ['ffmpeg', '-i', current_input, '-t', str(cut_start)]
-                            + self._temp_codec() + ['-y', part1.name], "cut part 1")
-                        s2, _ = self._safe_subprocess_run(
-                            ['ffmpeg', '-i', current_input, '-ss', str(cut_end)]
-                            + self._temp_codec() + ['-y', part2.name], "cut part 2")
-
-                        if s1 and s2:
-                            concat_list = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-                            concat_list.write(f"file '{part1.name}'\nfile '{part2.name}'")
-                            concat_list.close()
-                            temp_files.append(concat_list.name)
-                            cut_result = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
-                            cut_result.close()
-                            temp_files.append(cut_result.name)
-                            sc, _ = self._safe_subprocess_run(
-                                ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list.name]
-                                + self._temp_codec() + ['-y', cut_result.name], "concat parts")
-                            if sc and self._verify_audio(cut_result.name):
-                                current_input = cut_result.name
-
-                if self.settings['methods'].get('trim_silence', False):
-                    trim_dur = self.settings.get('trim_duration', 5)
-                    threshold = self.settings.get('trim_silence_threshold', -60)
-                    silence_end = 0.0
-                    detect_cmd = ['ffmpeg', '-i', current_input, '-af',
-                                  f'silencedetect=noise={threshold}dB:duration=0.3',
-                                  '-f', 'null', '-']
-                    ok, res = self._safe_subprocess_run(detect_cmd, "silence detect", allow_fail=True)
-                    if ok and res and res.stderr:
-                        match = re.search(r'silence_end:\s*([\d.]+)', res.stderr)
-                        if match:
-                            silence_end = float(match.group(1))
-                    if silence_end > 0:
-                        silence_end = min(silence_end, trim_dur)
-                        trim_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
-                        trim_temp.close()
-                        temp_files.append(trim_temp.name)
-                        success, _ = self._safe_subprocess_run(
-                            ['ffmpeg', '-i', current_input, '-ss', str(silence_end)]
-                            + self._temp_codec() + ['-y', trim_temp.name], "trim silence")
-                        if success and self._verify_audio(trim_temp.name):
-                            current_input = trim_temp.name
-
-                if self.settings['methods'].get('merge', False) and self.settings.get('extra_track_path'):
-                    extra_track = self.settings['extra_track_path']
-                    if os.path.exists(extra_track) and self._verify_mp3(extra_track):
-                        norm1 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                        norm1.close()
-                        temp_files.append(norm1.name)
-                        norm2 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                        norm2.close()
-                        temp_files.append(norm2.name)
-
-                        s1, r1 = self._safe_subprocess_run(
-                            ['ffmpeg', '-i', current_input, '-ar', '44100', '-ac', '2',
-                             '-c:a', 'pcm_s16le', '-y', norm1.name], "normalize main")
-                        s2, r2 = self._safe_subprocess_run(
-                            ['ffmpeg', '-i', extra_track, '-ar', '44100', '-ac', '2',
-                             '-c:a', 'pcm_s16le', '-y', norm2.name], "normalize extra")
-
-                        if s1 and s2 and os.path.getsize(norm1.name) > 0 and os.path.getsize(norm2.name) > 0:
-                            concat_list = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
-                            concat_list.write(f"file '{norm1.name.replace(chr(92), '/')}'\n")
-                            concat_list.write(f"file '{norm2.name.replace(chr(92), '/')}'\n")
-                            concat_list.close()
-                            temp_files.append(concat_list.name)
-                            merge_temp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
-                            merge_temp.close()
-                            temp_files.append(merge_temp.name)
-                            success, result = self._safe_subprocess_run(
-                                ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list.name,
-                                 '-codec:a', 'libmp3lame', '-q:a', '2', '-y', merge_temp.name], "concat wav")
-                            if success and self._verify_mp3(merge_temp.name):
-                                current_input = merge_temp.name
-                            else:
-                                self._try_alternative_merge(current_input, extra_track, temp_files, merge_temp.name)
-                                if os.path.exists(merge_temp.name) and self._verify_mp3(merge_temp.name):
-                                    current_input = merge_temp.name
-
-                if self.settings['methods'].get('vk_infrasonic', False):
-                    duration = self._get_duration(current_input)
-                    if duration and duration > 0:
-                        sample_rate = self._get_sample_rate(current_input) or 44100
-
-                        amplitude = self.settings.get('vk_infrasonic_amplitude', 0.35)
-                        if self.settings.get('vk_infrasonic_adaptive_amplitude', True):
-                            peak = self._get_peak_amplitude(current_input)
-                            if peak > 0:
-                                headroom_factor = max(0.3, (0.98 - peak) / 0.98)
-                                amplitude = amplitude * headroom_factor
-
-                        local_vk = {**self.settings, 'vk_infrasonic_amplitude': amplitude}
-                        expr_l = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.0)
-                        expr_r = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.5236)
-
-                        vk_temp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
-                        vk_temp.close()
-                        temp_files.append(vk_temp.name)
-
-                        fc = (
-                            f"[0:a]volume=0.97[main];"
-                            f"aevalsrc='{expr_l}|{expr_r}':c=stereo:s={sample_rate}[infra];"
-                            f"[main][infra]amix=inputs=2:duration=first:"
-                            f"dropout_transition=0:normalize=0[out]"
-                        )
-                        
-                        cmd_vk = [
-                            'ffmpeg', '-i', current_input,
-                            '-filter_complex', fc,
-                            '-map', '[out]',
-                            '-codec:a', 'libmp3lame', '-q:a', '2',
-                            '-y', vk_temp.name
-                        ]
-                        
-                        success_vk, result_vk = self._safe_subprocess_run(cmd_vk, "vk infrasonic", allow_fail=False)
-                        if success_vk and self._verify_mp3(vk_temp.name):
-                            current_input = vk_temp.name
-                        else:
-                            err = self._extract_ffmpeg_error(result_vk.stderr) if result_vk else "неизвестная ошибка"
-                            self.on_error(f"VK Инфразвук: не удалось применить — {err}")
-
-                ultrasonic_temp = None
-                if self.settings['methods'].get('ultrasonic_noise', False):
-                    ultrasonic_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                    ultrasonic_temp.close()
-                    temp_files.append(ultrasonic_temp.name)
-                    freq = self.settings.get('ultrasonic_freq', 21000)
-                    level = self.settings.get('ultrasonic_level', 0.001)
-                    duration = self._get_duration(current_input)
-                    if duration > 0:
-                        ok_ultra, _ = self._safe_subprocess_run(
-                            ['ffmpeg', '-f', 'lavfi',
-                             '-i', f'sine=frequency={freq}:sample_rate=44100:duration={duration}',
-                             '-af', f'volume={level}', '-y', ultrasonic_temp.name],
-                            "ultrasonic", allow_fail=True)
-                        if not ok_ultra:
-                            self.on_error(f"Ультразвук: не удалось сгенерировать сигнал {freq} Гц")
-
-                filters = self._build_filters(current_input)
-
-                if self.settings['methods'].get('fade_out', False):
-                    fade_dur = self.settings.get('fade_duration', 5)
-                    duration = self._get_duration(current_input)
-                    if duration > 0:
-                        fade_start = max(0, duration - fade_dur)
-                        fade_f = f"afade=t=out:st={fade_start}:d={fade_dur}"
-                        filters = f"{filters},{fade_f}" if filters else fade_f
-
-                cover_source_path = None
-                if self.settings.get('selected_cover_path') and os.path.exists(self.settings['selected_cover_path']):
-                    cover_source_path = self.settings['selected_cover_path']
-                elif self.settings.get('preserve_cover') and track_info and track_info.cover_data:
-                    cover_ext = track_info.cover_mime.split('/')[1] if '/' in track_info.cover_mime else 'jpg'
-                    cover_temp = tempfile.NamedTemporaryFile(suffix=f'.{cover_ext}', delete=False)
-                    cover_temp.write(track_info.cover_data)
-                    cover_temp.close()
-                    temp_files.append(cover_temp.name)
-                    cover_source_path = cover_temp.name
-
-                has_ultrasonic = (
-                    ultrasonic_temp and
-                    os.path.exists(ultrasonic_temp.name) and
-                    os.path.getsize(ultrasonic_temp.name) > 0
-                )
-
-                cmd = ['ffmpeg', '-i', current_input]
-
-                if has_ultrasonic:
-                    cmd.extend(['-i', ultrasonic_temp.name])
-                    cover_idx = 2
-                    amix = "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0"
-                    if filters:
-                        fc = f"{amix}[_mixed];[_mixed]{filters}[_out]"
-                    else:
-                        fc = f"{amix}[_out]"
-                    if cover_source_path:
-                        cmd.extend(['-i', cover_source_path])
-                        cmd.extend(['-filter_complex', fc, '-map', '[_out]', '-map', f'{cover_idx}:v'])
-                        if cover_source_path.lower().endswith(('.jpg', '.jpeg')):
-                            cmd.extend(['-c:v', 'copy', '-disposition:v', 'attached_pic'])
-                        else:
-                            cmd.extend(['-c:v', 'mjpeg', '-q:v', '2', '-disposition:v', 'attached_pic'])
-                    else:
-                        cmd.extend(['-filter_complex', fc, '-map', '[_out]'])
-                else:
-                    if cover_source_path:
-                        cmd.extend(['-i', cover_source_path])
-                        cmd.extend(['-map', '0:a', '-map', '1:v'])
-                        if cover_source_path.lower().endswith(('.jpg', '.jpeg')):
-                            cmd.extend(['-c:v', 'copy', '-disposition:v', 'attached_pic'])
-                        else:
-                            cmd.extend(['-c:v', 'mjpeg', '-q:v', '2', '-disposition:v', 'attached_pic'])
-                    else:
-                        cmd.extend(['-map', '0:a'])
-                    if filters:
-                        cmd.extend(['-af', filters])
-
-                if self.settings.get('rename_files', True):
-                    titles = ["Track", "Song", "Melody", "Rhythm", "Harmony", "Beat", "Flow", "Vibe", "Sound", "Wave"]
-                    title_to_use = f"{random.choice(titles)} {random.randint(1, 999)}"
-                else:
-                    title_to_use = self.metadata.get('title') or (track_info.title if track_info and self.settings.get('preserve_metadata') else "")
-
-                if title_to_use:
-                    cmd.extend(['-metadata', f'title={title_to_use}'])
-
-                artist = self.metadata.get('artist') or (track_info.artist if track_info and self.settings.get('preserve_metadata') else "")
-                if artist:
-                    cmd.extend(['-metadata', f'artist={artist}'])
-                album = self.metadata.get('album') or (track_info.album if track_info and self.settings.get('preserve_metadata') else "")
-                if album:
-                    cmd.extend(['-metadata', f'album={album}'])
-                year = self.metadata.get('year') or (track_info.year if track_info and self.settings.get('preserve_metadata') else "")
-                if year:
-                    cmd.extend(['-metadata', f'date={year}'])
-                genre = self.metadata.get('genre') or (track_info.genre if track_info and self.settings.get('preserve_metadata') else "")
-                if genre:
-                    cmd.extend(['-metadata', f'genre={genre}'])
-
-                if self.settings['methods'].get('fake_metadata', False):
-                    fake_text = ''.join(random.choices(
-                        'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-                        k=random.randint(100, 500)))
-                    cmd.extend(['-metadata', f'comment={fake_text}'])
-
-                if self.settings['methods'].get('bitrate_jitter', False):
-                    bitrate = random.choice([192, 224, 256, 320])
-                    cmd.extend(['-codec:a', 'libmp3lame', '-b:a', f'{bitrate}k'])
-                else:
-                    quality = self.settings.get('quality', '0')
-                    if str(quality).endswith('k'):
-                        cmd.extend(['-codec:a', 'libmp3lame', '-b:a', str(quality)])
-                    else:
-                        cmd.extend(['-codec:a', 'libmp3lame', '-q:a', str(quality)])
-
-                if self.settings['methods'].get('dither_attack', False):
-                    dither = self.settings.get('dither_method', 'triangular_hp')
-                    cmd.extend(['-dither_method', dither])
-
-                if self.settings['methods'].get('frame_shift', False):
-                    cmd.extend(['-write_xing', '0'])
-
-                cmd.extend(['-id3v2_version', '3', '-y', output_file])
+                current_input = self._apply_cut_fragment(current_input, temp_files)
+                current_input = self._apply_trim_silence(current_input, temp_files)
+                current_input = self._apply_merge(current_input, temp_files)
+                current_input = self._apply_vk_infrasonic(current_input, temp_files)
+                ultrasonic_path = self._generate_ultrasonic_track(current_input, temp_files)
+                filters = self._compute_filters(current_input)
+                cover_source_path = self._extract_cover(track_info, temp_files)
+                tags = self._resolve_tags(meta['orig'])
+                cmd = self._build_ffmpeg_cmd(
+                    current_input, ultrasonic_path, filters, cover_source_path, tags, output_file)
 
                 success, result = self._safe_subprocess_run(cmd, "main processing")
 
                 if success and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                    if self.settings['methods'].get('id3_padding_attack', False):
-                        try:
-                            self._apply_id3_padding_attack(output_file, self.settings.get('id3_padding_bytes', 512))
-                        except Exception as e:
-                            self.on_error(f"ID3 Padding Attack: {e}")
-                    if self.settings['methods'].get('reorder_tags', False):
-                        try:
-                            self._reorder_id3_tags(output_file)
-                        except Exception as e:
-                            self.on_error(f"Reorder Tags: {e}")
-                    if self.settings['methods'].get('broken_duration', False):
-                        try:
-                            self._apply_broken_duration(output_file, self.settings.get('broken_type', 0))
-                        except Exception as e:
-                            self.on_error(f"Broken Duration: {e}")
+                    self._apply_post_processing(output_file)
 
                 for temp_file in temp_files:
                     try:
                         if os.path.exists(temp_file):
                             os.unlink(temp_file)
-                    except:
+                    except Exception:
                         pass
 
                 if success and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
@@ -1053,7 +1343,7 @@ class ModificationWorker(threading.Thread):
                     if self.settings.get('delete_original', False):
                         try:
                             os.unlink(file_path)
-                        except:
+                        except Exception:
                             pass
                 else:
                     self.on_file_complete(file_path, False, "")
@@ -1065,7 +1355,7 @@ class ModificationWorker(threading.Thread):
                     try:
                         if os.path.exists(temp_file):
                             os.unlink(temp_file)
-                    except:
+                    except Exception:
                         pass
                 self.on_file_complete(file_path, False, "")
                 self.on_error(f"Ошибка: {str(e)}")
@@ -1103,10 +1393,19 @@ class ModificationWorker(threading.Thread):
         else:
             fake_ms = 16_777_215 * 1000
         audio.tags['TLEN'] = TLEN(encoding=3, text=str(fake_ms))
-        audio.save(v2_version=3)
 
-        with open(file_path, 'rb') as f:
-            data = bytearray(f.read())
+        # Save ID3 changes to a temp file, read back, then patch Xing in memory.
+        # Final write is atomic via os.replace so the file is never half-updated.
+        tmp_path = file_path + '.vkmod_tmp'
+        try:
+            audio.save(tmp_path, v2_version=3)
+            with open(tmp_path, 'rb') as f:
+                data = bytearray(f.read())
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
         vbr_pos = data.find(b'Xing')
         if vbr_pos == -1:
@@ -1137,7 +1436,7 @@ class ModificationWorker(threading.Thread):
                     fake_bytes = random.randint(0x01000000, 0x7FFFFFFF)
                     data[byte_offset: byte_offset + 4] = fake_bytes.to_bytes(4, 'big')
 
-                with open(file_path, 'wb') as f:
-                    f.write(data)
-
-
+        out_tmp = file_path + '.vkmod_out'
+        with open(out_tmp, 'wb') as f:
+            f.write(data)
+        os.replace(out_tmp, file_path)

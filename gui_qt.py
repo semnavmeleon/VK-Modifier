@@ -294,6 +294,49 @@ class _TrackInfoLoader(QThread):
             self.loaded.emit(path, ti)
 
 
+class _WaveformLoader(QThread):
+    loaded = pyqtSignal(str, object, object, float, float, float)
+
+    def __init__(self, filepath: str, which: str, parent=None):
+        super().__init__(parent)
+        self._filepath = filepath
+        self._which = which
+
+    def run(self):
+        try:
+            import numpy as np
+            sr = 22050
+            result = subprocess.run(
+                ["ffmpeg", "-i", self._filepath, "-vn", "-f", "f32le", "-ac", "1",
+                 "-ar", str(sr), "pipe:1", "-y"],
+                capture_output=True, stdin=subprocess.DEVNULL, timeout=30
+            )
+            if result.returncode != 0 or not result.stdout:
+                return
+            samples = np.frombuffer(result.stdout, dtype=np.float32)
+            if len(samples) == 0:
+                return
+            duration = len(samples) / sr
+
+            n_blocks = 4000
+            factor = max(1, len(samples) // n_blocks)
+            cut = (len(samples) // factor) * factor
+            mat = samples[:cut].reshape(-1, factor)
+            tops = mat.max(axis=1)
+            bots = mat.min(axis=1)
+
+            peak_abs = max(float(np.abs(tops).max()), float(np.abs(bots).max()), 1e-9)
+            tops = tops / peak_abs
+            bots = bots / peak_abs
+
+            rms_db  = float(20 * np.log10(np.sqrt(np.mean(samples ** 2)) + 1e-9))
+            peak_db = float(20 * np.log10(np.abs(samples).max() + 1e-9))
+
+            self.loaded.emit(self._which, tops, bots, duration, rms_db, peak_db)
+        except Exception:
+            pass
+
+
 class FileListPanel(QWidget):
     files_changed = pyqtSignal(list)
 
@@ -576,7 +619,6 @@ class MetadataWidget(QGroupBox):
         super().__init__("Метаданные", parent)
         lay = QGridLayout(self)
         lay.setSpacing(4)
-
         labels = ["Название", "Исполнитель", "Альбом", "Год", "Жанр"]
         self._fields: dict[str, QLineEdit] = {}
         for i, lbl in enumerate(labels):
@@ -585,34 +627,9 @@ class MetadataWidget(QGroupBox):
             lay.addWidget(e, i, 1)
             self._fields[lbl] = e
         lay.setColumnStretch(1, 1)
+        self._track = None
 
-        btn_row = QWidget()
-        bh = QHBoxLayout(btn_row)
-        bh.setContentsMargins(0, 0, 0, 0)
-        bh.addWidget(QPushButton("Из оригинала", clicked=self._from_track_signal))
-        bh.addWidget(QPushButton("Случайные", clicked=self._random))
-        bh.addWidget(QPushButton("Очистить", clicked=self.clear))
-        lay.addWidget(btn_row, len(labels), 0, 1, 2)
-
-        self._track: "TrackInfo | None" = None
-
-    def _from_track_signal(self):
-        if self._track:
-            self.set_from_track(self._track)
-
-    def _random(self):
-        words = ["Track", "Song", "Melody", "Wave", "Sound", "Beat", "Flow"]
-        self._fields["Название"].setText(f"{random.choice(words)} {random.randint(1, 999)}")
-        self._fields["Исполнитель"].setText("")
-        self._fields["Альбом"].setText("")
-        self._fields["Год"].setText(str(random.randint(2000, 2024)))
-        self._fields["Жанр"].setText("")
-
-    def clear(self):
-        for e in self._fields.values():
-            e.clear()
-
-    def set_from_track(self, track: "TrackInfo | None"):
+    def set_from_track(self, track, force: bool = False):
         self._track = track
         if track:
             self._fields["Название"].setText(track.title or "")
@@ -620,25 +637,18 @@ class MetadataWidget(QGroupBox):
             self._fields["Альбом"].setText(track.album or "")
             self._fields["Год"].setText(str(track.year or ""))
             self._fields["Жанр"].setText(track.genre or "")
-
-    def update_track_ref(self, track: "TrackInfo | None"):
-        self._track = track
+        else:
+            for f in self._fields.values():
+                f.setText("")
 
     def get_values(self) -> dict:
-        return {
-            "title":  self._fields["Название"].text(),
-            "artist": self._fields["Исполнитель"].text(),
-            "album":  self._fields["Альбом"].text(),
-            "year":   self._fields["Год"].text(),
-            "genre":  self._fields["Жанр"].text(),
-        }
+        return {"title": "", "artist": "", "album": "", "year": "", "genre": ""}
+
+    def get_lock_states(self) -> dict:
+        return {}
 
     def set_values(self, d: dict):
-        self._fields["Название"].setText(d.get("title", ""))
-        self._fields["Исполнитель"].setText(d.get("artist", ""))
-        self._fields["Альбом"].setText(d.get("album", ""))
-        self._fields["Год"].setText(d.get("year", ""))
-        self._fields["Жанр"].setText(d.get("genre", ""))
+        pass
 
 
 class TrackInfoWidget(QGroupBox):
@@ -1394,6 +1404,19 @@ class NamesTab(QWidget):
     preset_deleted = pyqtSignal()
     preset_saved   = pyqtSignal()
 
+    _BUILTIN_TEMPLATES = [
+        "VK_{n:03d}_custom",
+        "{n:03d}. {original}",
+        "{original}_{n:03d}",
+        "{artist} - {title}",
+        "{n:03d}. {artist} - {title}",
+        "{n:02d}_{original}",
+        "track_{n:04d}",
+        "{title} [{year}]",
+        "{artist} - {album} - {n:03d}",
+        "{n:03d}_{title}_{artist}",
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
@@ -1404,36 +1427,94 @@ class NamesTab(QWidget):
         self.le_template = QLineEdit("VK_{n:03d}_custom")
         g.layout().addWidget(self.le_template)
 
-        vars_w = QWidget()
-        vh = QHBoxLayout(vars_w)
-        vh.setContentsMargins(0, 0, 0, 0)
-        vh.setSpacing(4)
-        for var in ["{n}", "{n:03d}", "{original}", "{title}", "{artist}", "{album}", "{year}"]:
+        row1 = QWidget()
+        rh1 = QHBoxLayout(row1)
+        rh1.setContentsMargins(0, 0, 0, 0)
+        rh1.setSpacing(4)
+        for var in ["{n}", "{n:02d}", "{n:03d}", "{n:04d}", "{original}"]:
             btn = QPushButton(var)
-            btn.setFixedWidth(80)
+            btn.setFixedWidth(74)
             btn.clicked.connect(lambda checked, v=var: self._insert(v))
-            vh.addWidget(btn)
-        vh.addStretch()
-        g.layout().addWidget(vars_w)
+            rh1.addWidget(btn)
+        rh1.addStretch()
+        g.layout().addWidget(row1)
+
+        row2 = QWidget()
+        rh2 = QHBoxLayout(row2)
+        rh2.setContentsMargins(0, 0, 0, 0)
+        rh2.setSpacing(4)
+        for var in ["{title}", "{artist}", "{album}", "{year}", "{genre}"]:
+            btn = QPushButton(var)
+            btn.setFixedWidth(74)
+            btn.clicked.connect(lambda checked, v=var: self._insert(v))
+            rh2.addWidget(btn)
+        rh2.addStretch()
+        g.layout().addWidget(row2)
 
         self.lbl_preview = QLabel("Предпросмотр: VK_001_custom.mp3")
         self.lbl_preview.setStyleSheet("color: #88cc88; font-family: Consolas; font-size: 10px;")
         g.layout().addWidget(self.lbl_preview)
         lay.addWidget(g)
 
-        g2 = _grp("Сохранённые пресеты")
+        g_tpl = _grp("Шаблоны имён")
+        self.cmb_builtin = QComboBox()
+        self.cmb_builtin.addItems(self._BUILTIN_TEMPLATES)
+        btn_apply_builtin = QPushButton("Применить")
+        btn_apply_builtin.setFixedWidth(90)
+        btn_apply_builtin.clicked.connect(self._apply_builtin)
+        g_tpl.layout().addWidget(_row(QLabel("Встроенные:"), self.cmb_builtin, btn_apply_builtin))
+
+        self.lst_user_tpl = QListWidget()
+        self.lst_user_tpl.setFixedHeight(90)
+        self.lst_user_tpl.itemDoubleClicked.connect(self._apply_user_tpl)
+        g_tpl.layout().addWidget(QLabel("Пользовательские:"))
+        g_tpl.layout().addWidget(self.lst_user_tpl)
+        g_tpl.layout().addWidget(_row(
+            QPushButton("Сохранить текущий", clicked=self._save_user_tpl),
+            QPushButton("Применить", clicked=self._apply_user_tpl),
+            QPushButton("Удалить", clicked=self._del_user_tpl),
+        ))
+        lay.addWidget(g_tpl)
+
+        g2 = _grp("Сохранённые пресеты настроек")
         self.lst_presets = QListWidget()
-        self.lst_presets.setFixedHeight(120)
+        self.lst_presets.setFixedHeight(100)
         g2.layout().addWidget(self.lst_presets)
-        btn_row = _row(
+        g2.layout().addWidget(_row(
             QPushButton("Сохранить текущие настройки", clicked=self._save_preset_signal),
             QPushButton("Загрузить", clicked=self._load_preset_signal),
             QPushButton("Удалить", clicked=self._del_preset),
-        )
-        g2.layout().addWidget(btn_row)
+        ))
         lay.addWidget(g2)
 
+        g_meta = _grp("Принудительные метаданные для всех треков")
+        g_meta.setToolTip("Если поле заполнено — оно перезаписывает тег у ВСЕХ обрабатываемых треков")
+        meta_labels = ["Название", "Исполнитель", "Альбом", "Год", "Жанр", "Комментарий"]
+        self._meta_override_fields: dict[str, QLineEdit] = {}
+        self._meta_append_checks: dict[str, QCheckBox] = {}
+        meta_grid = QGridLayout()
+        meta_grid.setSpacing(4)
+        for i, lbl in enumerate(meta_labels):
+            meta_grid.addWidget(QLabel(lbl), i, 0)
+            e = QLineEdit()
+            e.setPlaceholderText("(оставьте пустым = взять из оригинала)")
+            meta_grid.addWidget(e, i, 1)
+            self._meta_override_fields[lbl] = e
+            cb = QCheckBox("добавить к тегу")
+            cb.setToolTip("Текст добавляется к исходному тегу, а не заменяет его")
+            meta_grid.addWidget(cb, i, 2)
+            self._meta_append_checks[lbl] = cb
+        meta_grid.setColumnStretch(1, 1)
+        g_meta_inner = QWidget()
+        g_meta_inner.setLayout(meta_grid)
+        g_meta.layout().addWidget(g_meta_inner)
+        g_meta.layout().addWidget(
+            QPushButton("Очистить всё", clicked=self._clear_meta_overrides)
+        )
+        lay.addWidget(g_meta)
+
         self._presets: list[dict] = []
+        self._user_templates: list[str] = []
         self.le_template.textChanged.connect(self._update_preview)
         self._save_cb = None
         self._load_cb = None
@@ -1442,11 +1523,36 @@ class NamesTab(QWidget):
     def _insert(self, var: str):
         self.le_template.insert(var)
 
+    def _apply_builtin(self):
+        self.le_template.setText(self.cmb_builtin.currentText())
+
+    def _save_user_tpl(self):
+        tpl = self.le_template.text().strip()
+        if tpl and tpl not in self._user_templates:
+            self._user_templates.append(tpl)
+            self.lst_user_tpl.addItem(tpl)
+            self._rebuild_template_dropdown()
+
+    def _apply_user_tpl(self, item=None):
+        if item is None:
+            row = self.lst_user_tpl.currentRow()
+            if 0 <= row < len(self._user_templates):
+                self.le_template.setText(self._user_templates[row])
+        else:
+            self.le_template.setText(item.text())
+
+    def _del_user_tpl(self):
+        row = self.lst_user_tpl.currentRow()
+        if 0 <= row < len(self._user_templates):
+            self._user_templates.pop(row)
+            self.lst_user_tpl.takeItem(row)
+            self._rebuild_template_dropdown()
+
     def _update_preview(self):
         tpl = self.le_template.text() or "VK_{n:03d}_custom"
         try:
             name = tpl.format(n=1, original="example", title="My Song",
-                              artist="Artist", album="Album", year="2024")
+                              artist="Artist", album="Album", year="2024", genre="Genre")
             self.lbl_preview.setText(f"Предпросмотр: {name}.mp3")
             self.lbl_preview.setStyleSheet("color:#88cc88;font-family:Consolas;font-size:10px;")
         except Exception as e:
@@ -1474,17 +1580,55 @@ class NamesTab(QWidget):
         for p in presets:
             self.lst_presets.addItem(p.get("name", "Без имени"))
 
+    def refresh_user_templates(self, templates: list[str]):
+        self._user_templates = list(templates)
+        self.lst_user_tpl.clear()
+        for t in self._user_templates:
+            self.lst_user_tpl.addItem(t)
+        self._rebuild_template_dropdown()
+
+    def _rebuild_template_dropdown(self):
+        current = self.cmb_builtin.currentText()
+        self.cmb_builtin.clear()
+        self.cmb_builtin.addItems(self._BUILTIN_TEMPLATES)
+        if self._user_templates:
+            self.cmb_builtin.insertSeparator(len(self._BUILTIN_TEMPLATES))
+            self.cmb_builtin.addItems(self._user_templates)
+        idx = self.cmb_builtin.findText(current)
+        if idx >= 0:
+            self.cmb_builtin.setCurrentIndex(idx)
+
     def get_selected_preset(self) -> "dict | None":
         row = self.lst_presets.currentRow()
         if 0 <= row < len(self._presets):
             return self._presets[row]
         return None
 
+    def _clear_meta_overrides(self):
+        for e in self._meta_override_fields.values():
+            e.clear()
+        for cb in self._meta_append_checks.values():
+            cb.setChecked(False)
+
+    def get_meta_overrides(self) -> dict:
+        lbl_key = {"Название": "title", "Исполнитель": "artist", "Альбом": "album",
+                   "Год": "year", "Жанр": "genre", "Комментарий": "comment"}
+        result = {key: self._meta_override_fields[lbl].text() for lbl, key in lbl_key.items()}
+        for lbl, key in lbl_key.items():
+            result[f"_append_{key}"] = self._meta_append_checks[lbl].isChecked()
+        return result
+
     def get_values(self) -> dict:
-        return {"filename_template": self.le_template.text() or "VK_{n:03d}_custom"}
+        return {"filename_template": self.le_template.text() or "VK_{n:03d}_custom",
+                **self.get_meta_overrides()}
 
     def set_values(self, d: dict):
         self.le_template.setText(d.get("filename_template", "VK_{n:03d}_custom"))
+        lbl_key = {"Название": "title", "Исполнитель": "artist", "Альбом": "album",
+                   "Год": "year", "Жанр": "genre", "Комментарий": "comment"}
+        for lbl, key in lbl_key.items():
+            self._meta_override_fields[lbl].setText(d.get(key, ""))
+            self._meta_append_checks[lbl].setChecked(d.get(f"_append_{key}", False))
 
 
 class WaveformViewer(QWidget):
@@ -1495,10 +1639,14 @@ class WaveformViewer(QWidget):
         lay.setSpacing(4)
 
         self._pg_available = False
-        self._fill_before = None
-        self._fill_after  = None
+        self._fill_before   = None
+        self._fill_after    = None
+        self._watermark_item = None
         self._rms_before: float | None = None
         self._rms_after:  float | None = None
+        self._anim_phase  = 0.0
+        self._loader_before: "_WaveformLoader | None" = None
+        self._loader_after:  "_WaveformLoader | None" = None
         try:
             import pyqtgraph as pg
             self._pg = pg
@@ -1519,6 +1667,10 @@ class WaveformViewer(QWidget):
             lbl.setStyleSheet("color:gray;font-size:9px;")
             lay.addWidget(lbl)
 
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(50)
+        self._anim_timer.timeout.connect(self._anim_tick)
+
         info_row = QWidget()
         ih = QHBoxLayout(info_row)
         ih.setContentsMargins(0, 0, 0, 0)
@@ -1533,44 +1685,25 @@ class WaveformViewer(QWidget):
         lay.addWidget(info_row)
 
     def show_before(self, filepath: str):
-        self._load_file(filepath, "before")
+        if self._loader_before and self._loader_before.isRunning():
+            self._loader_before.quit()
+        self._loader_before = _WaveformLoader(filepath, "before", self)
+        self._loader_before.loaded.connect(self._on_waveform_loaded)
+        self._loader_before.start()
 
     def show_after(self, filepath: str):
-        self._load_file(filepath, "after")
+        if self._loader_after and self._loader_after.isRunning():
+            self._loader_after.quit()
+        self._loader_after = _WaveformLoader(filepath, "after", self)
+        self._loader_after.loaded.connect(self._on_waveform_loaded)
+        self._loader_after.start()
 
-    def _load_file(self, filepath: str, which: str):
+    def _on_waveform_loaded(self, which: str, tops, bots, duration: float, rms_db: float, peak_db: float):
         try:
             import numpy as np
-            import subprocess as sp
             pg = self._pg if self._pg_available else None
-
-            sr = 22050
-            result = sp.run(
-                ["ffmpeg", "-i", filepath, "-vn", "-f", "f32le", "-ac", "1",
-                 "-ar", str(sr), "pipe:1", "-y"],
-                capture_output=True, stdin=sp.DEVNULL, timeout=30
-            )
-            if result.returncode != 0 or not result.stdout:
-                return
-            samples = np.frombuffer(result.stdout, dtype=np.float32)
-            duration = len(samples) / sr
-
-            n_blocks = 4000
-            factor = max(1, len(samples) // n_blocks)
-            cut = (len(samples) // factor) * factor
-            mat = samples[:cut].reshape(-1, factor)
-            tops = mat.max(axis=1)
-            bots = mat.min(axis=1)
-
-            peak_abs = max(float(np.abs(tops).max()), float(np.abs(bots).max()), 1e-9)
-            tops = tops / peak_abs
-            bots = bots / peak_abs
-
-            t = np.linspace(0, duration, len(tops))
-
-            rms_db  = float(20 * np.log10(np.sqrt(np.mean(samples ** 2)) + 1e-9))
-            peak_db = float(20 * np.log10(np.abs(samples).max() + 1e-9))
             info = f"RMS {rms_db:.1f} dBFS  Peak {peak_db:.1f} dBFS"
+            t = np.linspace(0, duration, len(tops))
 
             if which == "before":
                 self._rms_before = rms_db
@@ -1609,19 +1742,145 @@ class WaveformViewer(QWidget):
     def set_loading(self, loading: bool):
         if loading:
             self.lbl_after.setText("Обработка…")
-        elif self.lbl_after.text() == "Обработка…":
-            self.lbl_after.setText("После: —")
+            if self._pg_available:
+                self._top_after.setData([], [])
+                self._bot_after.setData([], [])
+                if self._fill_after:
+                    self.plot.removeItem(self._fill_after)
+                self._fill_after = self._pg.FillBetweenItem(
+                    self._top_after, self._bot_after,
+                    brush=self._pg.mkBrush(255, 120, 40, 35),
+                )
+                self.plot.addItem(self._fill_after)
+                self._anim_phase = 0.0
+                self._anim_timer.start()
+        else:
+            self._anim_timer.stop()
+            if self._pg_available:
+                self._top_after.setData([], [])
+                self._bot_after.setData([], [])
+                if self._fill_after:
+                    self.plot.removeItem(self._fill_after)
+                    self._fill_after = None
+                if self._watermark_item:
+                    self.plot.removeItem(self._watermark_item)
+                    self._watermark_item = None
+            if self.lbl_after.text() == "Обработка…":
+                self.lbl_after.setText("После: —")
+
+    def _anim_tick(self):
+        if not self._pg_available:
+            return
+        try:
+            import numpy as np
+            self._anim_phase += 0.07
+            t = np.linspace(0, 140, 500)
+            # частоты / 140 → та же визуальная плотность циклов на экране
+            w = (0.50 * np.sin(2 * np.pi * 0.015  * t + self._anim_phase) +
+                 0.28 * np.sin(2 * np.pi * 0.0379 * t + self._anim_phase * 1.5 + 1.0) +
+                 0.16 * np.sin(2 * np.pi * 0.0836 * t + self._anim_phase * 0.8 + 2.1) +
+                 0.08 * np.sin(2 * np.pi * 0.1357 * t + self._anim_phase * 2.1 + 0.5))
+            env = 0.6 + 0.3 * np.sin(self._anim_phase * 0.2)
+            w = w * env
+            self._top_after.setData(t, w)
+            self._bot_after.setData(t, -w[::-1] * 0.75)
+            self.plot.setXRange(0, 140, padding=0)
+            self.plot.setYRange(-1.15, 1.15, padding=0)
+        except Exception:
+            pass
 
     def _clear_after(self):
+        self._anim_timer.stop()
         if self._pg_available:
             self._top_after.setData([], [])
             self._bot_after.setData([], [])
+            self._top_after.setPen(self._pg.mkPen("#ff8844", width=1))
             if self._fill_after:
                 self.plot.removeItem(self._fill_after)
                 self._fill_after = None
+            if self._watermark_item:
+                self.plot.removeItem(self._watermark_item)
+                self._watermark_item = None
         self._rms_after = None
         self.lbl_after.setText("После: —")
         self.lbl_delta.setText("Δ: —")
+
+    def show_watermark(self):
+        if not self._pg_available:
+            self.lbl_after.setText("После: готово")
+            return
+        self._anim_timer.stop()
+        self._clear_after()
+        try:
+            import numpy as np
+            from PyQt6.QtGui import QPainterPath
+            from PyQt6.QtCore import QPointF
+
+            text = "vk.com/reuploadunder"
+            font = QFont("Consolas", 64, QFont.Weight.Bold)
+
+            # Геометрический контур шрифта (bezier-кривые) → набор полигонов
+            path = QPainterPath()
+            path.addText(QPointF(0.0, 0.0), font, text)
+            rect = path.boundingRect()
+            if rect.width() < 1 or rect.height() < 1:
+                raise ValueError("empty path")
+
+            polygons = path.toSubpathPolygons()
+
+            xs_list: list[float] = []
+            ys_list: list[float] = []
+            for poly in polygons:
+                n = poly.size()
+                if n < 2:
+                    continue
+                for i in range(n):
+                    pt = poly.at(i)
+                    xs_list.append(pt.x())
+                    ys_list.append(pt.y())
+                # замыкаем контур
+                pt0 = poly.at(0)
+                xs_list.append(pt0.x())
+                ys_list.append(pt0.y())
+                # разрыв между подпутями
+                xs_list.append(float('nan'))
+                ys_list.append(float('nan'))
+
+            if not xs_list:
+                raise ValueError("no polygons")
+
+            xs_arr = np.array(xs_list, dtype=float)
+            ys_arr = np.array(ys_list, dtype=float)
+
+            # Нормализация X в 0..140
+            x_min, x_max = rect.left(), rect.right()
+            xs_norm = (xs_arr - x_min) / (x_max - x_min) * 140
+
+            # Нормализация Y: Qt-координаты вниз, поэтому инвертируем
+            y_min, y_max = rect.top(), rect.bottom()
+            y_center = (y_min + y_max) / 2
+            y_scale = 1.7 / (y_max - y_min)
+            ys_norm = -(ys_arr - y_center) * y_scale
+
+            # Рисуем все контуры линиями, NaN → разрыв
+            self._top_after.setPen(self._pg.mkPen("#ff8844", width=2))
+            self._top_after.setData(xs_norm, ys_norm, connect='finite')
+            self._bot_after.setData([], [])
+
+            self.plot.setXRange(0, 140, padding=0.02)
+            self.plot.setYRange(-1.15, 1.15, padding=0)
+            self.lbl_after.setText("После: —")
+
+        except Exception:
+            self._watermark_item = self._pg.TextItem(
+                html='<span style="color:#666; font-family:Consolas; font-size:13pt; font-weight:bold;">vk.com/reuploadunder</span>',
+                anchor=(0.5, 0.5),
+            )
+            self.plot.addItem(self._watermark_item)
+            self._watermark_item.setPos(70, 0)
+            self.plot.setXRange(0, 140, padding=0.02)
+            self.plot.setYRange(-1.15, 1.15, padding=0)
+            self.lbl_after.setText("После: —")
 
 
 class LogPanel(QWidget):
@@ -1684,28 +1943,6 @@ class ModifierPanel(QWidget):
         th.addWidget(self.track_info)
         lay.addWidget(top_row)
 
-        preset_bar = QWidget()
-        pb = QHBoxLayout(preset_bar)
-        pb.setContentsMargins(0, 2, 0, 2)
-        pb.setSpacing(6)
-        pb.addWidget(QLabel("Пресет:"))
-        self.cmb_presets = QComboBox()
-        self.cmb_presets.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.cmb_presets.setPlaceholderText("(не выбран)")
-        pb.addWidget(self.cmb_presets, 1)
-        btn_preset_save = QPushButton("Сохранить")
-        btn_preset_save.setFixedWidth(90)
-        btn_preset_save.clicked.connect(self._save_preset)
-        btn_preset_load = QPushButton("Загрузить")
-        btn_preset_load.setFixedWidth(90)
-        btn_preset_load.clicked.connect(self._load_preset_from_bar)
-        btn_preset_del = QPushButton("Удалить")
-        btn_preset_del.setFixedWidth(80)
-        btn_preset_del.clicked.connect(self._del_preset_from_bar)
-        pb.addWidget(btn_preset_save)
-        pb.addWidget(btn_preset_load)
-        pb.addWidget(btn_preset_del)
-        lay.addWidget(preset_bar)
         lay.addWidget(_hline())
 
         self.tabs = QTabWidget()
@@ -1818,15 +2055,6 @@ class ModifierPanel(QWidget):
             else:
                 subprocess.Popen(["xdg-open", d])
 
-    def _refresh_preset_bar(self):
-        current = self.cmb_presets.currentText()
-        self.cmb_presets.clear()
-        for p in self._presets:
-            self.cmb_presets.addItem(p.get("name", "Без имени"))
-        idx = self.cmb_presets.findText(current)
-        if idx >= 0:
-            self.cmb_presets.setCurrentIndex(idx)
-
     def _save_preset(self):
         from PyQt6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Сохранить пресет", "Имя пресета:")
@@ -1834,26 +2062,18 @@ class ModifierPanel(QWidget):
             cfg = self.collect_all_settings()
             cfg["name"] = name
             self._presets.append(cfg)
-            self._refresh_preset_bar()
-            self.cmb_presets.setCurrentIndex(len(self._presets) - 1)
             self.names_tab.refresh_presets(self._presets)
             self.names_tab.preset_saved.emit()
-
-    def _load_preset_from_bar(self):
-        idx = self.cmb_presets.currentIndex()
-        if 0 <= idx < len(self._presets):
-            self.restore_all_settings(self._presets[idx])
 
     def _load_preset(self):
         p = self.names_tab.get_selected_preset()
         if p:
             self.restore_all_settings(p)
 
-    def _del_preset_from_bar(self):
-        idx = self.cmb_presets.currentIndex()
-        if 0 <= idx < len(self._presets):
-            self._presets.pop(idx)
-            self._refresh_preset_bar()
+    def _del_preset(self):
+        row = self.names_tab.lst_presets.currentRow()
+        if 0 <= row < len(self._presets):
+            self._presets.pop(row)
             self.names_tab.refresh_presets(self._presets)
             self.names_tab.preset_deleted.emit()
 
@@ -1877,7 +2097,7 @@ class ModifierPanel(QWidget):
         if not self._current_filepath:
             return
         settings  = self.collect_all_settings()
-        metadata  = self.metadata.get_values()
+        metadata  = self.names_tab.get_meta_overrides()
         self.preview_requested.emit(
             self._current_filepath,
             self._current_track,
@@ -1889,7 +2109,7 @@ class ModifierPanel(QWidget):
         self._current_filepath = filepath
         self._current_track    = track
         self.track_info.show_track(track)
-        self.metadata.update_track_ref(track)
+        self.metadata.set_from_track(track)
         self.cover.set_from_track(track)
         self.waveform._clear_after()
         if filepath and os.path.exists(filepath):
@@ -1898,12 +2118,14 @@ class ModifierPanel(QWidget):
     def on_processing_start(self, total: int):
         self._total = total
         self._completed = 0
+        self._last_output = None
         self._process_start = time.time()
         self.progress.setMaximum(total)
         self.progress.setValue(0)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.lbl_eta.setText("")
+        self.waveform.set_loading(True)
 
     def on_progress(self, cur: int, total: int, filepath: str):
         self.log.append(f"[{cur}/{total}] {os.path.basename(filepath)}", "info")
@@ -1913,7 +2135,7 @@ class ModifierPanel(QWidget):
         self.progress.setValue(self._completed)
         if ok:
             self.log.append(f"OK  {os.path.basename(filepath)} → {os.path.basename(output)}", "success")
-            QTimer.singleShot(200, lambda: self.waveform.show_after(output))
+            self._last_output = output
         else:
             self.log.append(f"ERR {os.path.basename(filepath)}", "error")
         elapsed = time.time() - self._process_start
@@ -1927,6 +2149,10 @@ class ModifierPanel(QWidget):
         self.progress.setValue(total)
         self.lbl_eta.setText("")
         self.log.append(f"Готово: {success}/{total} файлов обработано", "success")
+        self.waveform.set_loading(False)
+        if self._last_output:
+            self._last_output = None
+            QTimer.singleShot(300, lambda: self.waveform.show_watermark())
 
     def on_error(self, msg: str):
         self.log.append(f"ОШИБКА: {msg}", "error")
@@ -2035,7 +2261,7 @@ class ModifierPanel(QWidget):
             "delete_original":        self.cb_delete_orig.isChecked(),
             "_quality_str":           quality_str,
             "_output_dir":            self._output_dir,
-            "_presets":               self._presets,
+            "_meta_locks":            self.metadata.get_lock_states(),
         }
 
     def restore_all_settings(self, d: dict):
@@ -2058,10 +2284,7 @@ class ModifierPanel(QWidget):
         if d.get("_output_dir"):
             self._output_dir = d["_output_dir"]
             self.lbl_out_dir.setText(self._output_dir)
-        if d.get("_presets"):
-            self._presets = d["_presets"]
-            self._refresh_preset_bar()
-            self.names_tab.refresh_presets(self._presets)
+        self.metadata.set_values(d)
 
 
 class ConverterPanel(QWidget):
@@ -2175,7 +2398,7 @@ class MainWindow(QMainWindow):
         self._ffmpeg_ok = False
 
         _appdata = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        self._config_path = os.path.join(_appdata, "VKModifier", "config.json")
+        self._config_path = os.path.join(_appdata, "config.json")
 
         self._tray: "QSystemTrayIcon | None" = None
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -2305,7 +2528,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Папка вывода недоступна для записи:\n{e}")
             return
 
-        metadata = self.modifier_panel.metadata.get_values()
+        metadata = self.modifier_panel.names_tab.get_meta_overrides()
         max_workers = all_settings.get("max_workers", 1)
         delay = all_settings.get("thread_delay", 0.0)
 
@@ -2376,6 +2599,8 @@ class MainWindow(QMainWindow):
     def _on_preview_error(self, msg: str):
         self.modifier_panel.waveform.set_loading(False)
         self.modifier_panel.log.append(f"Предпросмотр: ошибка — {msg}", "error")
+        if self._preview_worker:
+            QTimer.singleShot(0, self._preview_worker.cleanup)
 
 
     def _start_converter(self):
@@ -2422,6 +2647,13 @@ class MainWindow(QMainWindow):
                 with open(self._config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
                 self.modifier_panel.restore_all_settings(cfg.get("settings", {}))
+                presets = cfg.get("presets", [])
+                if presets:
+                    self.modifier_panel._presets = presets
+                    self.modifier_panel.names_tab.refresh_presets(presets)
+                tpl_presets = cfg.get("template_presets", [])
+                if tpl_presets:
+                    self.modifier_panel.names_tab.refresh_user_templates(tpl_presets)
                 self.file_panel._recent = cfg.get("recent_files", [])
         except Exception:
             pass
@@ -2433,10 +2665,12 @@ class MainWindow(QMainWindow):
             with open(self._config_path, "w", encoding="utf-8") as f:
                 json.dump({
                     "settings": settings,
+                    "presets": self.modifier_panel._presets,
+                    "template_presets": self.modifier_panel.names_tab._user_templates,
                     "recent_files": self.file_panel._recent,
                 }, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        except Exception as e:
+            import traceback; traceback.print_exc()
 
     def closeEvent(self, event):
         self._save_config()
@@ -2472,7 +2706,6 @@ def _apply_dark_palette(app: QApplication):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("VKModifier")
-    app.setOrganizationName("VKModifier")
     _apply_dark_palette(app)
     win = MainWindow()
     win.show()
