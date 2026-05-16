@@ -209,7 +209,7 @@ class BatchConverter:
                 counter += 1
 
             args = self._get_ffmpeg_args(file_path, output_path)
-            result = subprocess.run(args, capture_output=True, encoding='utf-8', errors='ignore', timeout=300)
+            result = subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL, encoding='utf-8', errors='ignore', timeout=300)
 
             if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 if self.delete_originals:
@@ -260,12 +260,10 @@ class ModificationWorker(threading.Thread):
 
     @staticmethod
     def _safe_filename(s):
-        """Убирает символы, недопустимые в именах файлов Windows."""
         return re.sub(r'[\\/*?:"<>|]', '_', str(s)).strip() or '_'
 
     @staticmethod
     def _extract_ffmpeg_error(stderr, chars=2000):
-        """Пропускает шапку ffmpeg (версия/конфигурация) и возвращает реальную ошибку."""
         lines = stderr.splitlines()
         error_lines = []
         for line in lines:
@@ -282,7 +280,7 @@ class ModificationWorker(threading.Thread):
 
     def _safe_subprocess_run(self, cmd, description="", allow_fail=False):
         try:
-            result = subprocess.run(cmd, capture_output=True, encoding='utf-8', errors='ignore', timeout=300)
+            result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, encoding='utf-8', errors='ignore', timeout=300)
             if result.returncode != 0 and not allow_fail:
                 err = self._extract_ffmpeg_error(result.stderr)
                 self.on_error(f"FFmpeg ошибка ({description}):\n{err}")
@@ -329,7 +327,6 @@ class ModificationWorker(threading.Thread):
         return success
 
     def _build_spectral_mask_filter(self, audio_path, num_peaks=12, sensitivity=0.8, attenuation=12):
-        """Анализирует спектр через numpy FFT и строит notch-фильтры для пиков."""
         bands = [
             40, 50, 63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 630,
             800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 5000, 6300,
@@ -357,13 +354,12 @@ class ModificationWorker(threading.Thread):
         )
 
     def _analyze_spectrum(self, audio_path, bands):
-        """Декодирует аудио через ffmpeg и анализирует спектр via numpy FFT."""
         try:
             import numpy as np
             sample_rate = 44100
             cmd = ['ffmpeg', '-i', audio_path, '-vn', '-f', 'f32le',
                    '-ac', '1', '-ar', str(sample_rate), 'pipe:1', '-y']
-            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
             if result.returncode != 0 or not result.stdout:
                 return self._analyze_spectrum_ffmpeg(audio_path, bands)
 
@@ -371,10 +367,9 @@ class ModificationWorker(threading.Thread):
             if len(samples) < sample_rate:
                 return self._analyze_spectrum_ffmpeg(audio_path, bands)
 
-            # Ограничиваем длину: первые 30 секунд достаточно для анализа
             samples = samples[:sample_rate * 30]
             fft_size = 1 << (len(samples) - 1).bit_length()
-            fft_size = min(fft_size, 1 << 20)  # не более ~1M точек
+            fft_size = min(fft_size, 1 << 20)
             spectrum = np.abs(np.fft.rfft(samples, n=fft_size)) ** 2
             freqs = np.fft.rfftfreq(fft_size, d=1.0 / sample_rate)
 
@@ -397,7 +392,6 @@ class ModificationWorker(threading.Thread):
             return self._analyze_spectrum_ffmpeg(audio_path, bands)
 
     def _analyze_spectrum_ffmpeg(self, audio_path, bands):
-        """Запасной анализ: 27 bandpass-проходов через ffmpeg (медленно)."""
         band_energies = []
         for center_freq in bands:
             cmd = [
@@ -417,7 +411,6 @@ class ModificationWorker(threading.Thread):
         return band_energies or None
 
     def _build_concert_emulation_filter(self, intensity='medium'):
-        """Строит ffmpeg-фильтр эмуляции концертной записи."""
         filters = []
 
         configs = {
@@ -452,18 +445,15 @@ class ModificationWorker(threading.Thread):
         return ", ".join(filters)
     
     def _build_midside_filter(self, mid_eq_gain=-3, side_eq_gain=2):
-        """Строит stereotools-фильтр для раздельного усиления Mid и Side каналов в dB."""
         mid_lin  = 10 ** (mid_eq_gain  / 20)
         side_lin = 10 ** (side_eq_gain / 20)
         return f"stereotools=mlev={mid_lin:.4f}:slev={side_lin:.4f}"
 
     def _build_psychoacoustic_noise_filter(self, intensity=0.0003):
-        """Добавляет субмиллисекундное эхо для имитации акустической диффузии помещения."""
         decay = min(0.01 + intensity * 50, 0.15)
         return f"aecho=0.9:0.9:1:{decay:.3f}"
 
     def _build_saturation_filter(self, drive=1.5, mix=0.15):
-        """Строит цепочку acompressor + acrusher для аналогового ленточного насыщения."""
         mix_clamped = max(0.0, min(1.0, mix))
         drive_clamped = max(1.0, min(5.0, drive))
         return (
@@ -472,7 +462,6 @@ class ModificationWorker(threading.Thread):
         )
 
     def _build_temporal_jitter_filter(self, intensity=0.002, frequency=0.5):
-        """Строит aphaser-фильтр для эмуляции временного джиттера через модуляцию задержки."""
         freq_clamped = max(0.1, min(20.0, frequency))
         delay = max(0.1, min(5.0, intensity * 2000))
         decay = min(0.3, intensity * 50)
@@ -480,7 +469,6 @@ class ModificationWorker(threading.Thread):
 
     def _build_spectral_jitter_filter(self, num_notches=5, max_attenuation=15, fixed_frequencies=None, 
                                        fixed_attenuation=None, manual_config=None):
-        """Строит цепочку notch-фильтров в слышимом диапазоне."""
         filters = []
         freq_pool = [
             120, 250, 400, 630, 800, 1200, 1600, 2000, 
@@ -528,11 +516,6 @@ class ModificationWorker(threading.Thread):
         return ", ".join(filters)
 
     def _get_vk_infrasonic_expr(self, settings, extra_phase=0.0):
-        """Генерирует aevalsrc-выражение для инфразвуковой синусоиды.
-
-        extra_phase: дополнительный сдвиг фазы (радианы) — используется для
-        разделения левого и правого каналов при генерации стерео-сигнала.
-        """
         freq = settings.get('vk_infrasonic_freq', 18.0)
         amp = settings.get('vk_infrasonic_amplitude', 0.35)
         mode = settings.get('vk_infrasonic_mode', 'modulated')
@@ -548,7 +531,6 @@ class ModificationWorker(threading.Thread):
             elif wave_type == 'triangle':
                 return f"2/PI*asin(sin({arg}))"
             elif wave_type == 'square':
-                # if(gte(...)) вместо тернарного ?: — безопасно внутри filter_complex
                 return f"if(gte(sin({arg}),0),1.0,-1.0)"
             else:
                 return f"sin({arg})"
@@ -577,7 +559,7 @@ class ModificationWorker(threading.Thread):
                         h_arg = f"({h_arg}+{total_phase:.4f})"
                     terms.append(f"{amp * h_amp}*{wave_func(waveform, h_arg)}")
             expr = "+".join(terms)
-        else:  # maximum
+        else:
             mod_term = f"(1-{mod_depth}+{mod_depth}*sin(2*PI*{mod_freq}*t))"
             main_term = f"{amp}*{mod_term}*{wave_func(waveform, base_arg)}"
             if harmonics and len(harmonics) > 0 and harmonics[0] > 0:
@@ -593,7 +575,6 @@ class ModificationWorker(threading.Thread):
         return expr
 
     def _get_sample_rate(self, file_path):
-        """Определяет частоту дискретизации аудиофайла"""
         try:
             cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
                 '-show_entries', 'stream=sample_rate',
@@ -606,7 +587,6 @@ class ModificationWorker(threading.Thread):
         return 44100
 
     def _get_peak_amplitude(self, file_path):
-        """Определяет пиковую амплитуду аудио в линейном масштабе (0.0 - 1.0)"""
         try:
             cmd = ['ffmpeg', '-i', file_path, 
                 '-af', 'volumedetect', 
@@ -622,7 +602,6 @@ class ModificationWorker(threading.Thread):
         return 0.95
 
     def _build_filters(self, current_input=None):
-        """Собирает ffmpeg -af фильтр-цепочку из всех включённых методов."""
         filters = []
 
         if self.settings['methods'].get('spectral_masking', False):
@@ -776,16 +755,12 @@ class ModificationWorker(threading.Thread):
                         album=self._safe_filename(ex_album),
                         year=self._safe_filename(str(ex_year)),
                     ) + '.mp3'
-                    # Sanitize the full filename: literal parts of the template
-                    # (e.g. "[vk.com/reuploadunder]") may contain slashes or
-                    # other chars invalid in Windows paths.
                     output_filename = re.sub(r'[\\/*?:"<>|]', '_', output_filename)
                 except (KeyError, ValueError, IndexError):
                     output_filename = f"VK_{i+1:03d}_custom.mp3"
 
                 output_file = os.path.join(self.output_dir, output_filename)
 
-                # CUT FRAGMENT
                 if self.settings['methods'].get('cut_fragment', False):
                     cut_pos_percent = self.settings.get('cut_position_percent', 50)
                     cut_dur = self.settings.get('cut_duration', 2)
@@ -822,7 +797,6 @@ class ModificationWorker(threading.Thread):
                             if sc and self._verify_audio(cut_result.name):
                                 current_input = cut_result.name
 
-                # TRIM SILENCE
                 if self.settings['methods'].get('trim_silence', False):
                     trim_dur = self.settings.get('trim_duration', 5)
                     threshold = self.settings.get('trim_silence_threshold', -60)
@@ -846,7 +820,6 @@ class ModificationWorker(threading.Thread):
                         if success and self._verify_audio(trim_temp.name):
                             current_input = trim_temp.name
 
-                # MERGE
                 if self.settings['methods'].get('merge', False) and self.settings.get('extra_track_path'):
                     extra_track = self.settings['extra_track_path']
                     if os.path.exists(extra_track) and self._verify_mp3(extra_track):
@@ -883,7 +856,6 @@ class ModificationWorker(threading.Thread):
                                 if os.path.exists(merge_temp.name) and self._verify_mp3(merge_temp.name):
                                     current_input = merge_temp.name
 
-                # VK INFRASONIC
                 if self.settings['methods'].get('vk_infrasonic', False):
                     duration = self._get_duration(current_input)
                     if duration and duration > 0:
@@ -896,11 +868,7 @@ class ModificationWorker(threading.Thread):
                                 headroom_factor = max(0.3, (0.98 - peak) / 0.98)
                                 amplitude = amplitude * headroom_factor
 
-                        # Не мутируем self.settings — создаём локальную копию только с
-                        # пересчитанной амплитудой, чтобы не ломать батч-обработку.
                         local_vk = {**self.settings, 'vk_infrasonic_amplitude': amplitude}
-                        # Левый и правый каналы со сдвигом фазы π/6 (~30°) —
-                        # истинное стерео, которое не отменяется при даунмиксе в моно.
                         expr_l = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.0)
                         expr_r = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.5236)
 
@@ -930,7 +898,6 @@ class ModificationWorker(threading.Thread):
                             err = self._extract_ffmpeg_error(result_vk.stderr) if result_vk else "неизвестная ошибка"
                             self.on_error(f"VK Инфразвук: не удалось применить — {err}")
 
-                # ULTRASONIC
                 ultrasonic_temp = None
                 if self.settings['methods'].get('ultrasonic_noise', False):
                     ultrasonic_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
@@ -948,7 +915,6 @@ class ModificationWorker(threading.Thread):
                         if not ok_ultra:
                             self.on_error(f"Ультразвук: не удалось сгенерировать сигнал {freq} Гц")
 
-                # MAIN PROCESSING
                 filters = self._build_filters(current_input)
 
                 if self.settings['methods'].get('fade_out', False):
@@ -979,7 +945,6 @@ class ModificationWorker(threading.Thread):
                 cmd = ['ffmpeg', '-i', current_input]
 
                 if has_ultrasonic:
-                    # Two audio inputs → must use -filter_complex, not -af
                     cmd.extend(['-i', ultrasonic_temp.name])
                     cover_idx = 2
                     amix = "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0"
@@ -997,7 +962,6 @@ class ModificationWorker(threading.Thread):
                     else:
                         cmd.extend(['-filter_complex', fc, '-map', '[_out]'])
                 else:
-                    # Single audio input → simple -af / -map 0:a
                     if cover_source_path:
                         cmd.extend(['-i', cover_source_path])
                         cmd.extend(['-map', '0:a', '-map', '1:v'])

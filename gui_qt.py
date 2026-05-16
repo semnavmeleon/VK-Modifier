@@ -1,11 +1,7 @@
-#!/usr/bin/env python3
-"""VK Modifier — PyQt6 GUI (новый интерфейс, замена tkinter)."""
 
 import os
 import sys
 
-# When running from a PyInstaller --onefile bundle, binaries land in sys._MEIPASS.
-# Prepend that directory to PATH so ffmpeg/ffprobe are found without system install.
 if getattr(sys, "frozen", False):
     _bundle_dir = sys._MEIPASS
     os.environ["PATH"] = _bundle_dir + os.pathsep + os.environ.get("PATH", "")
@@ -37,9 +33,6 @@ from PyQt6.QtGui import (
 
 from core_logic import TrackInfo, ModificationWorker, BatchProcessor, BatchConverter
 
-# ── Constants ──────────────────────────────────────────────────────────────
-
-# CONFIG_PATH is computed in MainWindow.__init__ after QApplication exists
 
 AUDIO_EXTENSIONS = {
     ".mp3", ".flac", ".wav", ".ogg", ".aac", ".m4a", ".wma", ".opus",
@@ -75,7 +68,6 @@ QUALITY_MAP = {
     "VBR Среднее (Q4)": "4", "VBR Низкое (Q6)": "6",
 }
 
-# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _dbl(val, mn, mx, step=0.01, dec=2) -> QDoubleSpinBox:
     s = QDoubleSpinBox()
@@ -123,12 +115,10 @@ def _sep() -> QFrame:
     return _hline()
 
 
-# ── Worker Thread ──────────────────────────────────────────────────────────
-
 class WorkerThread(QThread):
-    progress      = pyqtSignal(int, int, str)   # cur, total, filepath
-    file_done     = pyqtSignal(str, bool, str)  # filepath, ok, output
-    all_done      = pyqtSignal(int, int)        # success, total
+    progress      = pyqtSignal(int, int, str)
+    file_done     = pyqtSignal(str, bool, str)
+    all_done      = pyqtSignal(int, int)
     error_msg     = pyqtSignal(str)
 
     def __init__(self, files, tracks_info, output_dir, settings, metadata,
@@ -153,7 +143,6 @@ class WorkerThread(QThread):
                 max_workers=self.max_workers, delay_between=self.delay_between,
                 stop_event=self._stop,
             )
-            # Run in a daemon thread and poll queue here
             t = threading.Thread(target=proc._run, daemon=True)
             t.start()
             while t.is_alive() or not self._q.empty():
@@ -239,8 +228,7 @@ class ConverterThread(QThread):
 
 
 class PreviewThread(QThread):
-    """Runs ModificationWorker on one file into a temp dir, then emits done(path)."""
-    done  = pyqtSignal(str)   # output path
+    done  = pyqtSignal(str)
     error = pyqtSignal(str)
 
     def __init__(self, filepath, track_info, settings, metadata):
@@ -290,11 +278,8 @@ class PreviewThread(QThread):
                 pass
 
 
-# ── Background TrackInfo loader ────────────────────────────────────────────
-
 class _TrackInfoLoader(QThread):
-    """Loads TrackInfo for a list of file paths in a background thread."""
-    loaded = pyqtSignal(str, object)  # path, TrackInfo or None
+    loaded = pyqtSignal(str, object)
 
     def __init__(self, paths: list, parent=None):
         super().__init__(parent)
@@ -309,10 +294,8 @@ class _TrackInfoLoader(QThread):
             self.loaded.emit(path, ti)
 
 
-# ── File List Panel ────────────────────────────────────────────────────────
-
 class FileListPanel(QWidget):
-    files_changed = pyqtSignal(list)  # list of paths
+    files_changed = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -366,7 +349,6 @@ class FileListPanel(QWidget):
         self._recent: list[str] = []
         self.setAcceptDrops(True)
 
-    # ── drag & drop ──
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
@@ -513,8 +495,6 @@ class FileListPanel(QWidget):
         return self._files[r] if r < len(self._files) else None
 
 
-# ── Cover Widget ───────────────────────────────────────────────────────────
-
 class CoverWidget(QGroupBox):
     changed = pyqtSignal()
 
@@ -591,8 +571,6 @@ class CoverWidget(QGroupBox):
         return self._path
 
 
-# ── Metadata Widget ────────────────────────────────────────────────────────
-
 class MetadataWidget(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Метаданные", parent)
@@ -643,6 +621,9 @@ class MetadataWidget(QGroupBox):
             self._fields["Год"].setText(str(track.year or ""))
             self._fields["Жанр"].setText(track.genre or "")
 
+    def update_track_ref(self, track: "TrackInfo | None"):
+        self._track = track
+
     def get_values(self) -> dict:
         return {
             "title":  self._fields["Название"].text(),
@@ -659,8 +640,6 @@ class MetadataWidget(QGroupBox):
         self._fields["Год"].setText(d.get("year", ""))
         self._fields["Жанр"].setText(d.get("genre", ""))
 
-
-# ── Track Info Widget ──────────────────────────────────────────────────────
 
 class TrackInfoWidget(QGroupBox):
     def __init__(self, parent=None):
@@ -690,8 +669,6 @@ class TrackInfoWidget(QGroupBox):
         self.txt.setPlainText("\n".join(lines))
 
 
-# ── Basic Tab ──────────────────────────────────────────────────────────────
-
 class BasicTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -706,7 +683,6 @@ class BasicTab(QWidget):
         lay = QVBoxLayout(content)
         lay.setSpacing(6)
 
-        # Pitch
         g = _grp("Сдвиг тона (полутоны)")
         self.cb_pitch = QCheckBox("Включить")
         self.sp_pitch = _dbl(0.5, -12.0, 12.0, 0.5, 1)
@@ -714,7 +690,6 @@ class BasicTab(QWidget):
         g.layout().addWidget(_row(QLabel("Полутонов:"), self.sp_pitch, None))
         lay.addWidget(g)
 
-        # Speed
         g = _grp("Изменение темпа")
         self.cb_speed = QCheckBox("Включить")
         self.sp_speed = _dbl(1.00, 0.5, 2.0, 0.05, 2)
@@ -722,7 +697,6 @@ class BasicTab(QWidget):
         g.layout().addWidget(_row(QLabel("Коэффициент:"), self.sp_speed, None))
         lay.addWidget(g)
 
-        # EQ
         g = _grp("Эквалайзер")
         self.cb_eq = QCheckBox("Включить")
         self.cmb_eq = QComboBox()
@@ -733,7 +707,6 @@ class BasicTab(QWidget):
         g.layout().addWidget(_row(QLabel("Усиление (dB):"), self.sp_eq, None))
         lay.addWidget(g)
 
-        # Silence padding
         g = _grp("Добавить тишину в конец")
         self.cb_silence = QCheckBox("Включить")
         self.sp_silence = _int(45, 1, 300)
@@ -741,7 +714,6 @@ class BasicTab(QWidget):
         g.layout().addWidget(_row(QLabel("Секунд:"), self.sp_silence, None))
         lay.addWidget(g)
 
-        # Loudnorm
         g = _grp("Нормализация громкости (EBU R128)")
         self.cb_loudnorm = QCheckBox("Включить")
         self.sp_loudnorm = _dbl(-14.0, -35.0, -5.0, 0.5, 1)
@@ -780,8 +752,6 @@ class BasicTab(QWidget):
         self.sp_loudnorm.setValue(d.get("loudnorm_target", -14.0))
 
 
-# ── Spectral Tab ───────────────────────────────────────────────────────────
-
 class SpectralTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -796,7 +766,6 @@ class SpectralTab(QWidget):
         lay = QVBoxLayout(content)
         lay.setSpacing(6)
 
-        # Phase invert
         g = _grp("Инверсия фазы")
         self.cb_phase_inv = QCheckBox("Включить")
         self.sp_phase_inv = _dbl(1.0, 0.1, 1.0, 0.1, 1)
@@ -804,7 +773,6 @@ class SpectralTab(QWidget):
         g.layout().addWidget(_row(QLabel("Сила (0–1):"), self.sp_phase_inv, None))
         lay.addWidget(g)
 
-        # Phase scramble
         g = _grp("Фазовый скремблинг")
         self.cb_phase_scr = QCheckBox("Включить")
         self.sp_phase_scr = _dbl(2.0, 0.1, 20.0, 0.1, 1)
@@ -812,7 +780,6 @@ class SpectralTab(QWidget):
         g.layout().addWidget(_row(QLabel("Скорость:"), self.sp_phase_scr, None))
         lay.addWidget(g)
 
-        # DC shift
         g = _grp("DC-сдвиг")
         self.cb_dc = QCheckBox("Включить")
         self.sp_dc = _dbl(0.000005, 0.000001, 0.01, 0.000001, 6)
@@ -820,7 +787,6 @@ class SpectralTab(QWidget):
         g.layout().addWidget(_row(QLabel("Смещение:"), self.sp_dc, None))
         lay.addWidget(g)
 
-        # Resample drift
         g = _grp("Дрейф частоты дискретизации")
         self.cb_resamp = QCheckBox("Включить")
         self.sp_resamp = _int(1, -100, 100)
@@ -828,7 +794,6 @@ class SpectralTab(QWidget):
         g.layout().addWidget(_row(QLabel("Дрейф (Гц):"), self.sp_resamp, None))
         lay.addWidget(g)
 
-        # Haas delay
         g = _grp("Haas-задержка (стерео расширение)")
         self.cb_haas = QCheckBox("Включить")
         self.sp_haas = _dbl(15.0, 1.0, 40.0, 0.5, 1)
@@ -836,7 +801,6 @@ class SpectralTab(QWidget):
         g.layout().addWidget(_row(QLabel("Задержка (мс):"), self.sp_haas, None))
         lay.addWidget(g)
 
-        # Ultrasonic noise
         g = _grp("Ультразвуковой шум")
         self.cb_ultra = QCheckBox("Включить")
         self.sp_ultra_freq = _int(21000, 18000, 22000)
@@ -846,7 +810,6 @@ class SpectralTab(QWidget):
         g.layout().addWidget(_row(QLabel("Уровень:"), self.sp_ultra_level, None))
         lay.addWidget(g)
 
-        # Dither
         g = _grp("Дизеринг-атака")
         self.cb_dither = QCheckBox("Включить")
         self.cmb_dither = QComboBox()
@@ -855,7 +818,6 @@ class SpectralTab(QWidget):
         g.layout().addWidget(_row(QLabel("Метод:"), self.cmb_dither))
         lay.addWidget(g)
 
-        # ID3 padding
         g = _grp("ID3 Padding Attack")
         self.cb_id3pad = QCheckBox("Включить")
         self.sp_id3pad = _int(512, 64, 2048)
@@ -908,8 +870,6 @@ class SpectralTab(QWidget):
         self.sp_id3pad.setValue(int(d.get("id3_padding_bytes", 512)))
 
 
-# ── Texture Tab ────────────────────────────────────────────────────────────
-
 class TextureTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -924,7 +884,6 @@ class TextureTab(QWidget):
         lay = QVBoxLayout(content)
         lay.setSpacing(6)
 
-        # Spectral masking
         g = _grp("Спектральное маскирование")
         self.cb_spec_mask = QCheckBox("Включить")
         self.sp_mask_sens = _dbl(0.8, 0.1, 3.0, 0.1, 1)
@@ -936,7 +895,6 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Пиков макс.:"), self.sp_mask_peaks, None))
         lay.addWidget(g)
 
-        # Concert emulation
         g = _grp("Концертная эмуляция")
         self.cb_concert = QCheckBox("Включить")
         self.cmb_concert = QComboBox()
@@ -946,7 +904,6 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Интенсивность:"), self.cmb_concert))
         lay.addWidget(g)
 
-        # Mid/Side
         g = _grp("Mid/Side обработка")
         self.cb_midside = QCheckBox("Включить")
         self.sp_mid_gain = _dbl(-3.0, -20.0, 20.0, 0.5, 1)
@@ -956,7 +913,6 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Side (dB):"), self.sp_side_gain, None))
         lay.addWidget(g)
 
-        # Psychoacoustic noise
         g = _grp("Психоакустическая диффузия")
         self.cb_psycho = QCheckBox("Включить")
         self.sp_psycho = _dbl(0.0003, 0.00001, 0.005, 0.00001, 5)
@@ -964,7 +920,6 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Интенсивность:"), self.sp_psycho, None))
         lay.addWidget(g)
 
-        # Saturation
         g = _grp("Аналоговое насыщение")
         self.cb_sat = QCheckBox("Включить")
         self.sp_sat_drive = _dbl(1.5, 1.0, 5.0, 0.1, 1)
@@ -974,7 +929,6 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Mix:"), self.sp_sat_mix, None))
         lay.addWidget(g)
 
-        # Temporal jitter
         g = _grp("Временной джиттер")
         self.cb_temp_jitter = QCheckBox("Включить")
         self.sp_jitter_int = _dbl(0.002, 0.0001, 0.1, 0.0001, 4)
@@ -984,7 +938,6 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Частота (Гц):"), self.sp_jitter_freq, None))
         lay.addWidget(g)
 
-        # Spectral jitter
         g = _grp("Спектральный джиттер (notch-фильтры)")
         self.cb_spec_jitter = QCheckBox("Включить")
         self.cmb_sj_mode = QComboBox()
@@ -996,15 +949,11 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Кол-во нотчей:"), self.sp_sj_count, None))
         g.layout().addWidget(_row(QLabel("Ослабл. (dB):"), self.sp_sj_att, None))
 
-        # Constructor sub-panel
         self._sj_constructor = QWidget()
         sj_lay = QVBoxLayout(self._sj_constructor)
         sj_lay.setContentsMargins(0, 4, 0, 0)
         sj_lay.setSpacing(4)
 
-        # ── Пресеты ──────────────────────────────────────────────────────────
-        # 6 уровней жёсткости: от почти неслышимых 2-х нотчей до 11-полосного
-        # максимума, который заметно окрашивает тембр.
         _SJ_PRESETS = [
             ("Мягкий",
              [(630, 3.0, 1.5), (3150, 4.0, 1.5)]),
@@ -1043,7 +992,6 @@ class TextureTab(QWidget):
         sj_lay.addWidget(pr_row)
         sj_lay.addWidget(_hline())
 
-        # ── Заголовок колонок (90 px = ширина _dbl, 28 px = кнопка ✕) ──────
         hdr_row = QWidget()
         hdr_lay = QHBoxLayout(hdr_row)
         hdr_lay.setContentsMargins(0, 0, 0, 0)
@@ -1072,7 +1020,6 @@ class TextureTab(QWidget):
         self.cmb_sj_mode.currentIndexChanged.connect(self._on_sj_mode)
         lay.addWidget(g)
 
-        # VK Infrasonic
         g = _grp("VK Инфразвук")
         self.cb_infra = QCheckBox("Включить")
         self.cmb_infra_mode = QComboBox()
@@ -1229,7 +1176,6 @@ class TextureTab(QWidget):
         self.cb_spec_jitter.setChecked(d.get("spectral_jitter", False))
         self.sp_sj_count.setValue(int(d.get("spectral_jitter_count", 5)))
         self.sp_sj_att.setValue(d.get("spectral_jitter_attenuation", 15.0))
-        # restore constructor rows
         rows_data = d.get("_sj_rows", [])
         for r in rows_data:
             self._add_sj_row(r.get("freq", 1000), r.get("att", 15), r.get("width", 2))
@@ -1257,8 +1203,6 @@ class TextureTab(QWidget):
             self.sp_infra_h3.setValue(harmonics[2])
 
 
-# ── Advanced Tab ───────────────────────────────────────────────────────────
-
 class AdvancedTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1273,7 +1217,6 @@ class AdvancedTab(QWidget):
         lay = QVBoxLayout(content)
         lay.setSpacing(6)
 
-        # Trim silence
         g = _grp("Обрезка начальной тишины")
         self.cb_trim = QCheckBox("Включить")
         self.sp_trim = _dbl(5.0, 0.1, 60.0, 0.5, 1)
@@ -1284,7 +1227,6 @@ class AdvancedTab(QWidget):
         g.layout().addWidget(QLabel("silencedetect находит реальный конец тишины", styleSheet="color:gray;font-size:9px;"))
         lay.addWidget(g)
 
-        # Cut fragment
         g = _grp("Вырезать фрагмент")
         self.cb_cut = QCheckBox("Включить")
         self.sp_cut_pos = _int(50, 0, 100)
@@ -1294,7 +1236,6 @@ class AdvancedTab(QWidget):
         g.layout().addWidget(_row(QLabel("Длина (с):"), self.sp_cut_dur, None))
         lay.addWidget(g)
 
-        # Fade out
         g = _grp("Затухание в конце (Fade Out)")
         self.cb_fade = QCheckBox("Включить")
         self.sp_fade = _dbl(5.0, 0.5, 60.0, 0.5, 1)
@@ -1302,7 +1243,6 @@ class AdvancedTab(QWidget):
         g.layout().addWidget(_row(QLabel("Длина (с):"), self.sp_fade, None))
         lay.addWidget(g)
 
-        # Merge
         g = _grp("Объединить с треком")
         self.cb_merge = QCheckBox("Включить")
         self.le_extra = QLineEdit()
@@ -1314,7 +1254,6 @@ class AdvancedTab(QWidget):
         g.layout().addWidget(_row(self.le_extra, btn_browse))
         lay.addWidget(g)
 
-        # Broken duration
         g = _grp("Сломанная длительность (метаданные)")
         self.cb_broken = QCheckBox("Включить")
         self.cmb_broken = QComboBox()
@@ -1362,8 +1301,6 @@ class AdvancedTab(QWidget):
         self.cmb_broken.setCurrentIndex(int(d.get("broken_type", 0)))
 
 
-# ── Technical Tab ──────────────────────────────────────────────────────────
-
 class TechnicalTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1401,8 +1338,6 @@ class TechnicalTab(QWidget):
         self.cb_bitrate_j.setChecked(d.get("bitrate_jitter", False))
         self.cb_frame_sh.setChecked(d.get("frame_shift", False))
 
-
-# ── System Tab ─────────────────────────────────────────────────────────────
 
 class SystemTab(QWidget):
     def __init__(self, parent=None):
@@ -1454,8 +1389,6 @@ class SystemTab(QWidget):
         self.sp_delay.setValue(d.get("thread_delay", 0.0))
         self.cb_lossless.setChecked(d.get("lossless_intermediate", True))
 
-
-# ── Names Tab ──────────────────────────────────────────────────────────────
 
 class NamesTab(QWidget):
     preset_deleted = pyqtSignal()
@@ -1554,8 +1487,6 @@ class NamesTab(QWidget):
         self.le_template.setText(d.get("filename_template", "VK_{n:03d}_custom"))
 
 
-# ── Waveform Viewer ────────────────────────────────────────────────────────
-
 class WaveformViewer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1577,7 +1508,6 @@ class WaveformViewer(QWidget):
             self.plot.setLabel("left", "Амплитуда")
             self.plot.setLabel("bottom", "Время", units="с")
             self.plot.setMinimumHeight(180)
-            # top/bottom curves for before (blue) and after (orange)
             self._top_before  = self.plot.plot(pen=pg.mkPen("#4488ff", width=1))
             self._bot_before  = self.plot.plot(pen=pg.mkPen("#4488ff", width=1))
             self._top_after   = self.plot.plot(pen=pg.mkPen("#ff8844", width=1))
@@ -1618,7 +1548,7 @@ class WaveformViewer(QWidget):
             result = sp.run(
                 ["ffmpeg", "-i", filepath, "-vn", "-f", "f32le", "-ac", "1",
                  "-ar", str(sr), "pipe:1", "-y"],
-                capture_output=True, timeout=30
+                capture_output=True, stdin=sp.DEVNULL, timeout=30
             )
             if result.returncode != 0 or not result.stdout:
                 return
@@ -1632,7 +1562,6 @@ class WaveformViewer(QWidget):
             tops = mat.max(axis=1)
             bots = mat.min(axis=1)
 
-            # Normalise to [-1, 1] so shapes are directly comparable regardless of loudness
             peak_abs = max(float(np.abs(tops).max()), float(np.abs(bots).max()), 1e-9)
             tops = tops / peak_abs
             bots = bots / peak_abs
@@ -1695,8 +1624,6 @@ class WaveformViewer(QWidget):
         self.lbl_delta.setText("Δ: —")
 
 
-# ── Log Panel ──────────────────────────────────────────────────────────────
-
 class LogPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1724,12 +1651,10 @@ class LogPanel(QWidget):
         self.txt.clear()
 
 
-# ── Modifier Panel ─────────────────────────────────────────────────────────
-
 class ModifierPanel(QWidget):
     start_requested   = pyqtSignal()
     stop_requested    = pyqtSignal()
-    preview_requested = pyqtSignal(str, object, dict, dict)  # filepath, track_info, settings, metadata
+    preview_requested = pyqtSignal(str, object, dict, dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1737,7 +1662,6 @@ class ModifierPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Scrollable top section
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         outer.addWidget(scroll, 1)
@@ -1748,7 +1672,6 @@ class ModifierPanel(QWidget):
         lay.setSpacing(6)
         lay.setContentsMargins(6, 6, 6, 6)
 
-        # Cover + Metadata + Track Info row
         top_row = QWidget()
         th = QHBoxLayout(top_row)
         th.setContentsMargins(0, 0, 0, 0)
@@ -1761,7 +1684,6 @@ class ModifierPanel(QWidget):
         th.addWidget(self.track_info)
         lay.addWidget(top_row)
 
-        # Preset bar — always visible above tabs
         preset_bar = QWidget()
         pb = QHBoxLayout(preset_bar)
         pb.setContentsMargins(0, 2, 0, 2)
@@ -1786,7 +1708,6 @@ class ModifierPanel(QWidget):
         lay.addWidget(preset_bar)
         lay.addWidget(_hline())
 
-        # Tabs
         self.tabs = QTabWidget()
         self.basic_tab    = BasicTab()
         self.spectral_tab = SpectralTab()
@@ -1804,7 +1725,6 @@ class ModifierPanel(QWidget):
         self.tabs.addTab(self.names_tab,    "Имена")
         lay.addWidget(self.tabs)
 
-        # Output settings
         out_g = _grp("Настройки вывода")
         out_lay = QGridLayout()
         out_g.layout().addLayout(out_lay)
@@ -1836,12 +1756,10 @@ class ModifierPanel(QWidget):
         out_lay.addWidget(self.cmb_quality,       5, 1)
         lay.addWidget(out_g)
 
-        # Waveform (outside scroll so it gets stable space)
         self.waveform = WaveformViewer()
         self.waveform.setMaximumHeight(220)
         outer.addWidget(self.waveform)
 
-        # Progress + action bar (fixed, outside scroll)
         action_w = QWidget()
         ah = QHBoxLayout(action_w)
         ah.setContentsMargins(6, 4, 6, 4)
@@ -1866,7 +1784,6 @@ class ModifierPanel(QWidget):
         ah.addWidget(self.btn_start)
         outer.addWidget(action_w)
 
-        # Log
         self.log = LogPanel()
         outer.addWidget(self.log)
 
@@ -1878,11 +1795,9 @@ class ModifierPanel(QWidget):
         self._current_filepath: str | None = None
         self._current_track = None
 
-        # Preset callbacks
         self.names_tab._save_cb = self._save_preset
         self.names_tab._load_cb = self._load_preset
 
-        # Auto-preview: re-run 900 ms after the last setting change
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(0)
@@ -1943,8 +1858,6 @@ class ModifierPanel(QWidget):
             self.names_tab.preset_deleted.emit()
 
     def _connect_settings_signals(self, root: QWidget):
-        # Only signal-trigger preview from tabs whose settings actually affect audio output.
-        # System, Names and Technical tabs control workers/filenames/tags — not audio filters.
         preview_tabs = (self.basic_tab, self.spectral_tab, self.texture_tab, self.advanced_tab)
         for tab in preview_tabs:
             for w in tab.findChildren(QCheckBox):
@@ -1957,7 +1870,6 @@ class ModifierPanel(QWidget):
                 w.currentIndexChanged.connect(self._schedule_preview)
 
     def _schedule_preview(self):
-        """Restart the debounce timer; preview fires 900 ms after last change."""
         if self._current_filepath:
             self._preview_timer.start()
 
@@ -1977,7 +1889,7 @@ class ModifierPanel(QWidget):
         self._current_filepath = filepath
         self._current_track    = track
         self.track_info.show_track(track)
-        self.metadata.set_from_track(track)
+        self.metadata.update_track_ref(track)
         self.cover.set_from_track(track)
         self.waveform._clear_after()
         if filepath and os.path.exists(filepath):
@@ -2063,14 +1975,12 @@ class ModifierPanel(QWidget):
                 "fake_metadata":       tech["fake_metadata"],
                 "reorder_tags":        tech["reorder_tags"],
             },
-            # basic
             "pitch_value":            b["pitch_value"],
             "speed_value":            b["speed_value"],
             "eq_type":                b["eq_type"],
             "eq_value":               b["eq_value"],
             "silence_duration":       b["silence_duration"],
             "loudnorm_target":        b["loudnorm_target"],
-            # spectral
             "phase_invert_strength":  s["phase_invert_strength"],
             "phase_scramble_speed":   s["phase_scramble_speed"],
             "dc_shift_value":         s["dc_shift_value"],
@@ -2080,7 +1990,6 @@ class ModifierPanel(QWidget):
             "ultrasonic_level":       s["ultrasonic_level"],
             "dither_method":          s["dither_method"],
             "id3_padding_bytes":      s["id3_padding_bytes"],
-            # texture
             "spectral_mask_sensitivity":   t["spectral_mask_sensitivity"],
             "spectral_mask_attenuation":   t["spectral_mask_attenuation"],
             "spectral_mask_peaks":         t["spectral_mask_peaks"],
@@ -2107,7 +2016,6 @@ class ModifierPanel(QWidget):
             "vk_infrasonic_waveform":      t["vk_infrasonic_waveform"],
             "vk_infrasonic_adaptive_amplitude": t["vk_infrasonic_adaptive_amplitude"],
             "vk_infrasonic_harmonics":     t["vk_infrasonic_harmonics"],
-            # advanced
             "trim_duration":          a["trim_duration"],
             "trim_silence_threshold": a["trim_silence_threshold"],
             "cut_position_percent":   a["cut_position_percent"],
@@ -2115,11 +2023,9 @@ class ModifierPanel(QWidget):
             "fade_duration":          a["fade_duration"],
             "extra_track_path":       a["extra_track_path"],
             "broken_type":            a["broken_type"],
-            # system
             "lossless_intermediate":  sys_v["lossless_intermediate"],
             "max_workers":            sys_v["max_workers"],
             "thread_delay":           sys_v["thread_delay"],
-            # output
             "filename_template":      names["filename_template"],
             "quality":                quality,
             "rename_files":           self.cb_rename.isChecked(),
@@ -2127,7 +2033,6 @@ class ModifierPanel(QWidget):
             "preserve_cover":         self.cb_preserve_cover.isChecked(),
             "selected_cover_path":    self.cover.get_path(),
             "delete_original":        self.cb_delete_orig.isChecked(),
-            # serialization extras
             "_quality_str":           quality_str,
             "_output_dir":            self._output_dir,
             "_presets":               self._presets,
@@ -2158,8 +2063,6 @@ class ModifierPanel(QWidget):
             self._refresh_preset_bar()
             self.names_tab.refresh_presets(self._presets)
 
-
-# ── Converter Panel ────────────────────────────────────────────────────────
 
 class ConverterPanel(QWidget):
     start_requested = pyqtSignal()
@@ -2258,8 +2161,6 @@ class ConverterPanel(QWidget):
         self.log.append(f"ОШИБКА: {msg}", "error")
 
 
-# ── Main Window ────────────────────────────────────────────────────────────
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2289,7 +2190,6 @@ class MainWindow(QMainWindow):
         self._check_ffmpeg()
 
     def _build_ui(self):
-        # Toolbar
         tb = self.addToolBar("Режим")
         tb.setMovable(False)
         self._act_modifier  = QAction("Модификатор", self, checkable=True, checked=True)
@@ -2302,7 +2202,6 @@ class MainWindow(QMainWindow):
         self._lbl_ffmpeg = QLabel("  FFmpeg: проверка…  ")
         tb.addWidget(self._lbl_ffmpeg)
 
-        # Main splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(splitter)
 
@@ -2324,7 +2223,6 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([300, 980])
 
-        # Connect signals
         self.modifier_panel.start_requested.connect(self._start_modifier)
         self.modifier_panel.stop_requested.connect(self._stop)
         self.modifier_panel.preview_requested.connect(self._start_preview)
@@ -2332,7 +2230,6 @@ class MainWindow(QMainWindow):
         self.modifier_panel.names_tab.preset_deleted.connect(self._save_config)
         self.modifier_panel.names_tab.preset_saved.connect(self._save_config)
 
-        # Status bar
         self._status = self.statusBar()
         self._status.showMessage("Готов")
 
@@ -2355,7 +2252,7 @@ class MainWindow(QMainWindow):
 
     def _check_ffmpeg(self):
         try:
-            subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5, check=True)
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, stdin=subprocess.DEVNULL, timeout=5, check=True)
             self._ffmpeg_ok = True
             self._lbl_ffmpeg.setText("  FFmpeg: ✓ найден  ")
             self._lbl_ffmpeg.setStyleSheet("color:#55cc55;")
@@ -2376,7 +2273,6 @@ class MainWindow(QMainWindow):
         fpath = self.file_panel.current_file()
         self.modifier_panel.on_file_selected(track, fpath)
 
-    # ── Modifier processing ──
 
     def _start_modifier(self):
         files = self.file_panel.get_files()
@@ -2443,8 +2339,6 @@ class MainWindow(QMainWindow):
         self._stop_event.set()
         self.modifier_panel.btn_stop.setEnabled(False)
         self.modifier_panel.log.append("Остановка запрошена…", "warning")
-        # btn_start is re-enabled by on_all_done when the worker finishes its current file.
-        # If no worker is running (e.g. already done), re-enable immediately.
         if not (self._worker and self._worker.isRunning()):
             self.modifier_panel.btn_start.setEnabled(True)
 
@@ -2452,7 +2346,6 @@ class MainWindow(QMainWindow):
         if not self._ffmpeg_ok:
             QMessageBox.critical(self, "Ошибка", "FFmpeg не найден!")
             return
-        # Cancel any running preview
         if self._preview_worker and self._preview_worker.isRunning():
             self._preview_worker.cancel()
             self._preview_worker.wait(3000)
@@ -2484,7 +2377,6 @@ class MainWindow(QMainWindow):
         self.modifier_panel.waveform.set_loading(False)
         self.modifier_panel.log.append(f"Предпросмотр: ошибка — {msg}", "error")
 
-    # ── Converter processing ──
 
     def _start_converter(self):
         files = self.file_panel.get_files()
@@ -2523,7 +2415,6 @@ class MainWindow(QMainWindow):
                 4000,
             )
 
-    # ── Config ──
 
     def _load_config(self):
         try:
@@ -2553,8 +2444,6 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-# ── Dark palette ───────────────────────────────────────────────────────────
-
 def _apply_dark_palette(app: QApplication):
     app.setStyle("Fusion")
     pal = QPalette()
@@ -2579,8 +2468,6 @@ def _apply_dark_palette(app: QApplication):
     pal.setColor(QPalette.ColorRole.Mid,             light)
     app.setPalette(pal)
 
-
-# ── Entry point ────────────────────────────────────────────────────────────
 
 def main():
     app = QApplication(sys.argv)
