@@ -455,7 +455,8 @@ Batch audio processing tool that modifies the acoustic and structural properties
 **Cross-platform (from source):** Requires Python 3.10+ and FFmpeg in system PATH.
 ```bash
 pip install PyQt6 mutagen pyqtgraph numpy
-python gui_qt.py```
+python gui_qt.py
+```
 
 ### Documentation
 Full interface guide, parameter descriptions, and usage examples are available in Russian in the main README.
