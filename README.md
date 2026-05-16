@@ -429,3 +429,44 @@ https://vk.com/reuploadunder
 ## Дисклеймер
 
 Программа предназначена для законных целей: защита авторских прав, исследование систем распознавания аудио, тестирование в рамках разрешённых пентестов. Обработка чужих файлов без разрешения правообладателя — ответственность пользователя.
+
+[RU](#vk-modifier) | [EN](#english-summary)
+
+# VK Modifier
+
+... (весь ваш текущий русский контент от "Инструмент пакетной обработки" до "Наша группа ВК") ...
+
+## Дисклеймер
+
+... (русский текст дисклеймера) ...
+
+---
+
+## English Summary
+
+Batch audio processing tool that modifies the acoustic and structural properties of audio files to interfere with automated fingerprint recognition systems. Processing intensity is adjustable to maintain perceptual audio quality. Built with FFmpeg and PyQt6.
+
+### Features
+- 30+ processing methods across 7 categories: Basic, Spectral, Textural, Advanced, Technical, System, Naming
+- Spectral dithering via notch filters with 6 presets
+- Infrasound injection (1–20 Hz) with 5 modulation modes and adaptive amplitude
+- Phase manipulation, Haas delay, DC shift, sample rate drift, and configurable dithering
+- ID3 padding attack and metadata obfuscation
+- Waveform visualizer with original vs processed comparison, RMS/Peak delta tracking
+- Multi-threaded batch processing with configurable thread count and inter-job delay
+- Preset system with manual save/load and automatic configuration persistence
+- Built-in format converter supporting 20+ codecs (MP3, FLAC, OGG, AAC, Opus, WAV, etc.)
+
+### Installation
+**Windows:** Download the precompiled executable from [Releases](https://github.com/semnavmeleon/VK-Modifier/releases). FFmpeg is bundled and extracted to a temporary directory at runtime.
+
+**Cross-platform (from source):** Requires Python 3.10+ and FFmpeg in system PATH.
+```bash
+pip install PyQt6 mutagen pyqtgraph numpy
+python gui_qt.py
+
+### Documentation
+Full interface guide, parameter descriptions, and usage examples are available in Russian in the main README.
+
+### Disclaimer
+Intended for legitimate purposes including copyright protection, audio recognition research, and authorized testing. Processing third-party content without authorization is the user's responsibility.
