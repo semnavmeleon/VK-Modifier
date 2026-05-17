@@ -1394,18 +1394,11 @@ class ModificationWorker(threading.Thread):
             fake_ms = 16_777_215 * 1000
         audio.tags['TLEN'] = TLEN(encoding=3, text=str(fake_ms))
 
-        # Save ID3 changes to a temp file, read back, then patch Xing in memory.
-        # Final write is atomic via os.replace so the file is never half-updated.
-        tmp_path = file_path + '.vkmod_tmp'
-        try:
-            audio.save(tmp_path, v2_version=3)
-            with open(tmp_path, 'rb') as f:
-                data = bytearray(f.read())
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+        # Save ID3 changes in-place, read back, then patch Xing in memory.
+        # Avoids a separate .vkmod_tmp file that mutagen may fail to create (ENOENT).
+        audio.save(v2_version=3)
+        with open(file_path, 'rb') as f:
+            data = bytearray(f.read())
 
         vbr_pos = data.find(b'Xing')
         if vbr_pos == -1:
