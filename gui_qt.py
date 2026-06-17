@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QTabWidget, QScrollArea, QGroupBox,
     QProgressBar, QTextEdit, QFileDialog, QMessageBox,
     QMenu, QFrame, QStackedWidget, QAbstractItemView,
-    QSystemTrayIcon, QSizePolicy,
+    QSystemTrayIcon, QSizePolicy, QDial,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStandardPaths, QTimer, QSize
 from PyQt6.QtGui import (
@@ -1105,14 +1105,18 @@ class TextureTab(QWidget):
 
     def get_values(self) -> dict:
         mode = self.cmb_sj_mode.currentIndex()
-        if mode == 1 and self._sj_rows:
-            manual_config = {
-                "mode": "manual",
-                "frequencies": [r["freq"].value() for r in self._sj_rows],
-                "attenuations": [r["att"].value() for r in self._sj_rows],
-                "widths": [r["width"].value() for r in self._sj_rows],
-            }
-            fixed_freqs = manual_config["frequencies"]
+        if mode == 1:
+            if self._sj_rows:
+                manual_config = {
+                    "mode": "manual",
+                    "frequencies": [r["freq"].value() for r in self._sj_rows],
+                    "attenuations": [r["att"].value() for r in self._sj_rows],
+                    "widths": [r["width"].value() for r in self._sj_rows],
+                }
+                fixed_freqs = manual_config["frequencies"]
+            else:
+                manual_config = {"mode": "manual"}
+                fixed_freqs = None
             fixed_att = None
         else:
             manual_config = {"mode": "random"}
@@ -1264,6 +1268,32 @@ class AdvancedTab(QWidget):
         g.layout().addWidget(_row(self.le_extra, btn_browse))
         lay.addWidget(g)
 
+        g = _grp("Наложение аудиодорожки (поверх основного трека)")
+        self.cb_overlay = QCheckBox("Включить")
+        self.le_overlay = QLineEdit()
+        self.le_overlay.setPlaceholderText("Путь к файлу наложения...")
+        btn_browse_overlay = QPushButton("…")
+        btn_browse_overlay.setFixedWidth(28)
+        btn_browse_overlay.clicked.connect(self._browse_overlay)
+        self.sp_overlay_vol = _dbl(0.5, 0.0, 2.0, 0.1, 1)
+        g.layout().addWidget(self.cb_overlay)
+        g.layout().addWidget(_row(self.le_overlay, btn_browse_overlay))
+        g.layout().addWidget(_row(QLabel("Громкость доп. трека:"), self.sp_overlay_vol, None))
+        lay.addWidget(g)
+
+        g = _grp("Вставить аудио в точку трека (без наложения)")
+        self.cb_insert = QCheckBox("Включить")
+        self.le_insert = QLineEdit()
+        self.le_insert.setPlaceholderText("Путь к вставляемому файлу...")
+        btn_browse_insert = QPushButton("…")
+        btn_browse_insert.setFixedWidth(28)
+        btn_browse_insert.clicked.connect(self._browse_insert)
+        self.sp_insert_pos = _dbl(10.0, 0.0, 9999.0, 0.5, 1)
+        g.layout().addWidget(self.cb_insert)
+        g.layout().addWidget(_row(self.le_insert, btn_browse_insert))
+        g.layout().addWidget(_row(QLabel("Позиция вставки (с):"), self.sp_insert_pos, None))
+        lay.addWidget(g)
+
         g = _grp("Сломанная длительность (метаданные)")
         self.cb_broken = QCheckBox("Включить")
         self.cmb_broken = QComboBox()
@@ -1280,6 +1310,18 @@ class AdvancedTab(QWidget):
         if p:
             self.le_extra.setText(p)
 
+    def _browse_overlay(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Выберите аудиофайл для наложения", "",
+            "Аудио (*.mp3 *.wav *.flac *.ogg *.aac)")
+        if p:
+            self.le_overlay.setText(p)
+
+    def _browse_insert(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Выберите вставляемый аудиофайл", "",
+            "Аудио (*.mp3 *.wav *.flac *.ogg *.aac)")
+        if p:
+            self.le_insert.setText(p)
+
     def get_values(self) -> dict:
         return {
             "trim_silence": self.cb_trim.isChecked(),
@@ -1292,6 +1334,12 @@ class AdvancedTab(QWidget):
             "fade_duration": self.sp_fade.value(),
             "merge": self.cb_merge.isChecked(),
             "extra_track_path": self.le_extra.text().strip() or None,
+            "overlay": self.cb_overlay.isChecked(),
+            "overlay_path": self.le_overlay.text().strip() or None,
+            "overlay_volume": self.sp_overlay_vol.value(),
+            "insert_audio": self.cb_insert.isChecked(),
+            "insert_audio_path": self.le_insert.text().strip() or None,
+            "insert_position_sec": self.sp_insert_pos.value(),
             "broken_duration": self.cb_broken.isChecked(),
             "broken_type": self.cmb_broken.currentIndex(),
         }
@@ -1307,6 +1355,12 @@ class AdvancedTab(QWidget):
         self.sp_fade.setValue(d.get("fade_duration", 5.0))
         self.cb_merge.setChecked(d.get("merge", False))
         self.le_extra.setText(d.get("extra_track_path") or "")
+        self.cb_overlay.setChecked(d.get("overlay", False))
+        self.le_overlay.setText(d.get("overlay_path") or "")
+        self.sp_overlay_vol.setValue(d.get("overlay_volume", 0.5))
+        self.cb_insert.setChecked(d.get("insert_audio", False))
+        self.le_insert.setText(d.get("insert_audio_path") or "")
+        self.sp_insert_pos.setValue(d.get("insert_position_sec", 10.0))
         self.cb_broken.setChecked(d.get("broken_duration", False))
         self.cmb_broken.setCurrentIndex(int(d.get("broken_type", 0)))
 
@@ -1991,6 +2045,25 @@ class ModifierPanel(QWidget):
         out_lay.addWidget(self.cb_delete_orig,    4, 0, 1, 2)
         out_lay.addWidget(QLabel("Качество:"),    5, 0)
         out_lay.addWidget(self.cmb_quality,       5, 1)
+
+        self.dial_volume = QDial()
+        self.dial_volume.setRange(0, 200)
+        self.dial_volume.setValue(100)
+        self.dial_volume.setNotchesVisible(True)
+        self.dial_volume.setFixedSize(52, 52)
+        self.lbl_volume = QLabel("100%")
+        self.lbl_volume.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_volume.setFixedWidth(42)
+        self.dial_volume.valueChanged.connect(lambda v: self.lbl_volume.setText(f"{v}%"))
+        _vol_row = QWidget()
+        _vr_lay = QHBoxLayout(_vol_row)
+        _vr_lay.setContentsMargins(0, 0, 0, 0)
+        _vr_lay.setSpacing(6)
+        _vr_lay.addWidget(self.dial_volume)
+        _vr_lay.addWidget(self.lbl_volume)
+        _vr_lay.addStretch()
+        out_lay.addWidget(QLabel("Громкость вывода:"), 6, 0)
+        out_lay.addWidget(_vol_row, 6, 1)
         lay.addWidget(out_g)
 
         self.waveform = WaveformViewer()
@@ -2195,6 +2268,8 @@ class ModifierPanel(QWidget):
                 "cut_fragment":        a["cut_fragment"],
                 "fade_out":            a["fade_out"],
                 "merge":               a["merge"],
+                "overlay":             a["overlay"],
+                "insert_audio":        a["insert_audio"],
                 "broken_duration":     a["broken_duration"],
                 "bitrate_jitter":      tech["bitrate_jitter"],
                 "frame_shift":         tech["frame_shift"],
@@ -2248,7 +2323,12 @@ class ModifierPanel(QWidget):
             "cut_duration":           a["cut_duration"],
             "fade_duration":          a["fade_duration"],
             "extra_track_path":       a["extra_track_path"],
+            "overlay_path":           a["overlay_path"],
+            "overlay_volume":         a["overlay_volume"],
+            "insert_audio_path":      a["insert_audio_path"],
+            "insert_position_sec":    a["insert_position_sec"],
             "broken_type":            a["broken_type"],
+            "output_volume":          self.dial_volume.value() / 100.0,
             "lossless_intermediate":  sys_v["lossless_intermediate"],
             "max_workers":            sys_v["max_workers"],
             "thread_delay":           sys_v["thread_delay"],
@@ -2281,6 +2361,8 @@ class ModifierPanel(QWidget):
         self.cb_preserve_meta.setChecked(d.get("preserve_metadata", True))
         self.cb_preserve_cover.setChecked(d.get("preserve_cover", True))
         self.cb_delete_orig.setChecked(d.get("delete_original", False))
+        vol = int(d.get("output_volume", 1.0) * 100)
+        self.dial_volume.setValue(max(0, min(200, vol)))
         if d.get("_output_dir"):
             self._output_dir = d["_output_dir"]
             self.lbl_out_dir.setText(self._output_dir)

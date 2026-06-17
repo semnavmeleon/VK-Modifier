@@ -1084,6 +1084,77 @@ class ModificationWorker(threading.Thread):
             return merge_temp.name
         return current_input
 
+    def _apply_overlay(self, current_input, temp_files):
+        if not (self.settings['methods'].get('overlay', False) and self.settings.get('overlay_path')):
+            return current_input
+        extra = self.settings['overlay_path']
+        if not os.path.exists(extra):
+            return current_input
+        overlay_vol = self.settings.get('overlay_volume', 0.5)
+        overlay_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        overlay_temp.close()
+        temp_files.append(overlay_temp.name)
+        fc = (
+            f"[0:a]volume=1.0[main];"
+            f"[1:a]volume={overlay_vol:.4f}[extra];"
+            f"[main][extra]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[out]"
+        )
+        cmd = [
+            'ffmpeg', '-i', current_input, '-i', extra,
+            '-filter_complex', fc, '-map', '[out]',
+        ] + self._temp_codec() + ['-y', overlay_temp.name]
+        success, _ = self._safe_subprocess_run(cmd, "overlay")
+        if success and self._verify_audio(overlay_temp.name):
+            return overlay_temp.name
+        return current_input
+
+    def _apply_insert_audio(self, current_input, temp_files):
+        if not (self.settings['methods'].get('insert_audio', False) and self.settings.get('insert_audio_path')):
+            return current_input
+        extra = self.settings['insert_audio_path']
+        if not os.path.exists(extra):
+            return current_input
+        insert_pos = self.settings.get('insert_position_sec', 10.0)
+
+        part1 = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        part1.close()
+        temp_files.append(part1.name)
+        part2 = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        part2.close()
+        temp_files.append(part2.name)
+        extra_norm = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        extra_norm.close()
+        temp_files.append(extra_norm.name)
+
+        s1, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', current_input, '-t', str(insert_pos)]
+            + self._temp_codec() + ['-y', part1.name], "insert part1")
+        s2, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', current_input, '-ss', str(insert_pos)]
+            + self._temp_codec() + ['-y', part2.name], "insert part2")
+        se, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-i', extra, '-ar', '44100', '-ac', '2']
+            + self._temp_codec() + ['-y', extra_norm.name], "insert normalize extra")
+        if not (s1 and s2 and se):
+            return current_input
+
+        concat_list = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
+        concat_list.write(f"file '{part1.name.replace(chr(92), '/')}'\n")
+        concat_list.write(f"file '{extra_norm.name.replace(chr(92), '/')}'\n")
+        concat_list.write(f"file '{part2.name.replace(chr(92), '/')}'\n")
+        concat_list.close()
+        temp_files.append(concat_list.name)
+
+        result_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
+        result_temp.close()
+        temp_files.append(result_temp.name)
+        sc, _ = self._safe_subprocess_run(
+            ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list.name]
+            + self._temp_codec() + ['-y', result_temp.name], "insert concat")
+        if sc and self._verify_audio(result_temp.name):
+            return result_temp.name
+        return current_input
+
     def _apply_vk_infrasonic(self, current_input, temp_files):
         if not self.settings['methods'].get('vk_infrasonic', False):
             return current_input
@@ -1100,7 +1171,7 @@ class ModificationWorker(threading.Thread):
         local_vk = {**self.settings, 'vk_infrasonic_amplitude': amplitude}
         expr_l = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.0)
         expr_r = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.5236)
-        vk_temp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+        vk_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
         vk_temp.close()
         temp_files.append(vk_temp.name)
         fc = (
@@ -1113,11 +1184,9 @@ class ModificationWorker(threading.Thread):
             'ffmpeg', '-i', current_input,
             '-filter_complex', fc,
             '-map', '[out]',
-            '-codec:a', 'libmp3lame', '-q:a', '2',
-            '-y', vk_temp.name
-        ]
+        ] + self._temp_codec() + ['-y', vk_temp.name]
         success_vk, result_vk = self._safe_subprocess_run(cmd_vk, "vk infrasonic", allow_fail=False)
-        if success_vk and self._verify_mp3(vk_temp.name):
+        if success_vk and self._verify_audio(vk_temp.name):
             return vk_temp.name
         err = self._extract_ffmpeg_error(result_vk.stderr) if result_vk else "неизвестная ошибка"
         self.on_error(f"VK Инфразвук: не удалось применить — {err}")
@@ -1153,6 +1222,10 @@ class ModificationWorker(threading.Thread):
                 fade_start = max(0, duration - fade_dur)
                 fade_f = f"afade=t=out:st={fade_start}:d={fade_dur}"
                 filters = f"{filters},{fade_f}" if filters else fade_f
+        vol = self.settings.get('output_volume', 1.0)
+        if abs(vol - 1.0) > 0.001:
+            vol_f = f"volume={vol:.4f}"
+            filters = f"{filters},{vol_f}" if filters else vol_f
         return filters
 
     def _extract_cover(self, track_info, temp_files):
@@ -1282,7 +1355,10 @@ class ModificationWorker(threading.Thread):
                 self.on_error(f"Reorder Tags: {e}")
         if self.settings['methods'].get('broken_duration', False):
             try:
-                self._apply_broken_duration(output_file, self.settings.get('broken_type', 0))
+                self._apply_broken_duration(
+                    output_file,
+                    self.settings.get('broken_type', 0),
+                )
             except Exception as e:
                 self.on_error(f"Broken Duration: {e}")
 
@@ -1317,6 +1393,8 @@ class ModificationWorker(threading.Thread):
                 current_input = self._apply_cut_fragment(current_input, temp_files)
                 current_input = self._apply_trim_silence(current_input, temp_files)
                 current_input = self._apply_merge(current_input, temp_files)
+                current_input = self._apply_overlay(current_input, temp_files)
+                current_input = self._apply_insert_audio(current_input, temp_files)
                 current_input = self._apply_vk_infrasonic(current_input, temp_files)
                 ultrasonic_path = self._generate_ultrasonic_track(current_input, temp_files)
                 filters = self._compute_filters(current_input)
@@ -1384,18 +1462,16 @@ class ModificationWorker(threading.Thread):
         audio = MP3(file_path)
         if audio.tags is None:
             audio.add_tags()
-        if bug_type == 0:
+        if bug_type == 0:    # Очень большая (1 ч – 10 ч)
             fake_ms = random.randint(3_600_000, 36_000_000)
-        elif bug_type == 1:
+        elif bug_type == 1:  # Очень маленькая (0.1 с – 3 с)
             fake_ms = random.randint(100, 3_000)
-        elif bug_type == 2:
+        elif bug_type == 2:  # Случайная (1 мин – 2 ч)
             fake_ms = random.randint(60_000, 7_200_000)
-        else:
+        else:                # Максимум
             fake_ms = 16_777_215 * 1000
         audio.tags['TLEN'] = TLEN(encoding=3, text=str(fake_ms))
 
-        # Save ID3 changes in-place, read back, then patch Xing in memory.
-        # Avoids a separate .vkmod_tmp file that mutagen may fail to create (ENOENT).
         audio.save(v2_version=3)
         with open(file_path, 'rb') as f:
             data = bytearray(f.read())
@@ -1411,15 +1487,14 @@ class ModificationWorker(threading.Thread):
                 frame_offset = vbr_pos + 8
                 real_frames = int.from_bytes(data[frame_offset: frame_offset + 4], 'big')
 
-                if bug_type == 0:
+                if bug_type == 0:    # Очень большая
                     mult = random.randint(50, 200)
-                    fake_frames = min(real_frames * mult if real_frames > 0 else 0x00500000,
-                                      0xFFFFFF00)
-                elif bug_type == 1:
+                    fake_frames = min(real_frames * mult if real_frames > 0 else 0x00500000, 0xFFFFFF00)
+                elif bug_type == 1:  # Очень маленькая
                     fake_frames = random.randint(1, 50)
-                elif bug_type == 2:
+                elif bug_type == 2:  # Случайная
                     fake_frames = random.randint(0x00100000, 0x00EFFFFF)
-                else:
+                else:                # Максимум
                     fake_frames = 0xFFFFFF00
 
                 data[frame_offset: frame_offset + 4] = fake_frames.to_bytes(4, 'big')
