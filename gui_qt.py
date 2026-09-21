@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QTabWidget, QScrollArea, QGroupBox,
     QProgressBar, QTextEdit, QFileDialog, QMessageBox,
     QMenu, QFrame, QStackedWidget, QAbstractItemView,
-    QSystemTrayIcon, QSizePolicy, QDial,
+    QSystemTrayIcon, QSizePolicy, QDial, QInputDialog,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QStandardPaths, QTimer, QSize
 from PyQt6.QtGui import (
@@ -889,7 +889,7 @@ class SpectralTab(QWidget):
         self.cb_drift_variable.setChecked(d.get("drift_variable", False))
         self.cb_micro_pitch.setChecked(d.get("micro_pitch", False))
         self.sp_micro_pitch.setValue(d.get("micro_pitch_cents", 4.0))
-        self.cb_micro_pitch_rand.setChecked(d.get("micro_pitch_random_sign", True))
+        self.cb_micro_pitch_rand.setChecked(d.get("micro_pitch_random_sign", False))
         self.cb_haas.setChecked(d.get("haas_delay", False))
         self.sp_haas.setValue(d.get("haas_delay_ms", 15.0))
         self.cb_ultra.setChecked(d.get("ultrasonic_noise", False))
@@ -973,6 +973,7 @@ class TextureTab(QWidget):
 
         g = _grp("Спектральный джиттер (notch-фильтры)")
         self.cb_spec_jitter = QCheckBox("Включить")
+        self.cb_spec_jitter.setChecked(True)
         self.cmb_sj_mode = QComboBox()
         self.cmb_sj_mode.addItems(["Случайные", "Конструктор"])
         self.sp_sj_count = _int(5, 1, 50)
@@ -1064,6 +1065,7 @@ class TextureTab(QWidget):
         self._sj_constructor.hide()
         self.cmb_sj_mode.currentIndexChanged.connect(self._on_sj_mode)
         self.sp_sj_count.valueChanged.connect(self._on_sj_count_changed)
+        self._apply_sj_preset([(630, 3.0, 1.5), (3150, 4.0, 1.5)])
         lay.addWidget(g)
 
         g = _grp("VK Инфразвук")
@@ -1261,6 +1263,11 @@ class TextureTab(QWidget):
         self.sp_jitter_int.setValue(d.get("jitter_intensity", 0.002))
         self.sp_jitter_freq.setValue(d.get("jitter_frequency", 0.5))
         self.cb_spec_jitter.setChecked(d.get("spectral_jitter", False))
+        for rdata in list(self._sj_rows):
+            rdata["widget"].setParent(None)
+            rdata["widget"].deleteLater()
+        self._sj_rows.clear()
+        self.cmb_sj_mode.setCurrentIndex(0)
         self.sp_sj_count.setValue(int(d.get("spectral_jitter_count", 5)))
         self.sp_sj_att.setValue(d.get("spectral_jitter_attenuation", 15.0))
         self.cb_sj_adaptive.setChecked(d.get("sj_adaptive", False))
@@ -1549,9 +1556,6 @@ class SystemTab(QWidget):
 
 
 class NamesTab(QWidget):
-    preset_deleted = pyqtSignal()
-    preset_saved   = pyqtSignal()
-
     _BUILTIN_TEMPLATES = [
         "VK_{n:03d}_custom",
         "{n:03d}. {original}",
@@ -1624,17 +1628,6 @@ class NamesTab(QWidget):
         ))
         lay.addWidget(g_tpl)
 
-        g2 = _grp("Сохранённые пресеты настроек")
-        self.lst_presets = QListWidget()
-        self.lst_presets.setFixedHeight(100)
-        g2.layout().addWidget(self.lst_presets)
-        g2.layout().addWidget(_row(
-            QPushButton("Сохранить текущие настройки", clicked=self._save_preset_signal),
-            QPushButton("Загрузить", clicked=self._load_preset_signal),
-            QPushButton("Удалить", clicked=self._del_preset),
-        ))
-        lay.addWidget(g2)
-
         g_meta = _grp("Принудительные метаданные для всех треков")
         g_meta.setToolTip("Если поле заполнено — оно перезаписывает тег у ВСЕХ обрабатываемых треков")
         meta_labels = ["Название", "Исполнитель", "Альбом", "Год", "Жанр", "Комментарий"]
@@ -1661,11 +1654,8 @@ class NamesTab(QWidget):
         )
         lay.addWidget(g_meta)
 
-        self._presets: list[dict] = []
         self._user_templates: list[str] = []
         self.le_template.textChanged.connect(self._update_preview)
-        self._save_cb = None
-        self._load_cb = None
         lay.addStretch()
 
     def _insert(self, var: str):
@@ -1707,27 +1697,6 @@ class NamesTab(QWidget):
             self.lbl_preview.setText(f"Ошибка: {e}")
             self.lbl_preview.setStyleSheet("color:#cc4444;font-family:Consolas;font-size:10px;")
 
-    def _save_preset_signal(self):
-        if self._save_cb:
-            self._save_cb()
-
-    def _load_preset_signal(self):
-        if self._load_cb:
-            self._load_cb()
-
-    def _del_preset(self):
-        row = self.lst_presets.currentRow()
-        if 0 <= row < len(self._presets):
-            self._presets.pop(row)
-            self.lst_presets.takeItem(row)
-            self.preset_deleted.emit()
-
-    def refresh_presets(self, presets: list[dict]):
-        self._presets = presets
-        self.lst_presets.clear()
-        for p in presets:
-            self.lst_presets.addItem(p.get("name", "Без имени"))
-
     def refresh_user_templates(self, templates: list[str]):
         self._user_templates = list(templates)
         self.lst_user_tpl.clear()
@@ -1745,12 +1714,6 @@ class NamesTab(QWidget):
         idx = self.cmb_builtin.findText(current)
         if idx >= 0:
             self.cmb_builtin.setCurrentIndex(idx)
-
-    def get_selected_preset(self) -> "dict | None":
-        row = self.lst_presets.currentRow()
-        if 0 <= row < len(self._presets):
-            return self._presets[row]
-        return None
 
     def _clear_meta_overrides(self):
         for e in self._meta_override_fields.values():
@@ -1923,7 +1886,6 @@ class WaveformViewer(QWidget):
             import numpy as np
             self._anim_phase += 0.07
             t = np.linspace(0, 140, 500)
-            # частоты / 140 → та же визуальная плотность циклов на экране
             w = (0.50 * np.sin(2 * np.pi * 0.015  * t + self._anim_phase) +
                  0.28 * np.sin(2 * np.pi * 0.0379 * t + self._anim_phase * 1.5 + 1.0) +
                  0.16 * np.sin(2 * np.pi * 0.0836 * t + self._anim_phase * 0.8 + 2.1) +
@@ -1967,7 +1929,6 @@ class WaveformViewer(QWidget):
             text = "vk.com/reuploadunder"
             font = QFont("Consolas", 64, QFont.Weight.Bold)
 
-            # Геометрический контур шрифта (bezier-кривые) → набор полигонов
             path = QPainterPath()
             path.addText(QPointF(0.0, 0.0), font, text)
             rect = path.boundingRect()
@@ -1986,11 +1947,9 @@ class WaveformViewer(QWidget):
                     pt = poly.at(i)
                     xs_list.append(pt.x())
                     ys_list.append(pt.y())
-                # замыкаем контур
                 pt0 = poly.at(0)
                 xs_list.append(pt0.x())
                 ys_list.append(pt0.y())
-                # разрыв между подпутями
                 xs_list.append(float('nan'))
                 ys_list.append(float('nan'))
 
@@ -2000,17 +1959,14 @@ class WaveformViewer(QWidget):
             xs_arr = np.array(xs_list, dtype=float)
             ys_arr = np.array(ys_list, dtype=float)
 
-            # Нормализация X в 0..140
             x_min, x_max = rect.left(), rect.right()
             xs_norm = (xs_arr - x_min) / (x_max - x_min) * 140
 
-            # Нормализация Y: Qt-координаты вниз, поэтому инвертируем
             y_min, y_max = rect.top(), rect.bottom()
             y_center = (y_min + y_max) / 2
             y_scale = 1.7 / (y_max - y_min)
             ys_norm = -(ys_arr - y_center) * y_scale
 
-            # Рисуем все контуры линиями, NaN → разрыв
             self._top_after.setPen(self._pg.mkPen("#ff8844", width=2))
             self._top_after.setData(xs_norm, ys_norm, connect='finite')
             self._bot_after.setData([], [])
@@ -2062,6 +2018,8 @@ class ModifierPanel(QWidget):
     start_requested   = pyqtSignal()
     stop_requested    = pyqtSignal()
     preview_requested = pyqtSignal(str, object, dict, dict)
+    preset_saved      = pyqtSignal()
+    preset_deleted    = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2158,6 +2116,19 @@ class ModifierPanel(QWidget):
         _vr_lay.addStretch()
         out_lay.addWidget(QLabel("Громкость вывода:"), 6, 0)
         out_lay.addWidget(_vol_row, 6, 1)
+
+        self.cmb_presets = QComboBox()
+        self.cmb_presets.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        _preset_btns = QWidget()
+        _pb_lay = QHBoxLayout(_preset_btns)
+        _pb_lay.setContentsMargins(0, 0, 0, 0)
+        _pb_lay.setSpacing(4)
+        _pb_lay.addWidget(self.cmb_presets, 1)
+        _pb_lay.addWidget(QPushButton("Сохранить", clicked=self._save_preset))
+        _pb_lay.addWidget(QPushButton("Загрузить", clicked=self._load_preset))
+        _pb_lay.addWidget(QPushButton("Удалить", clicked=self._del_preset))
+        out_lay.addWidget(QLabel("Пресет настроек:"), 7, 0)
+        out_lay.addWidget(_preset_btns, 7, 1)
         lay.addWidget(out_g)
 
         self.waveform = WaveformViewer()
@@ -2199,9 +2170,6 @@ class ModifierPanel(QWidget):
         self._current_filepath: str | None = None
         self._current_track = None
 
-        self.names_tab._save_cb = self._save_preset
-        self.names_tab._load_cb = self._load_preset
-
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(0)
@@ -2223,26 +2191,57 @@ class ModifierPanel(QWidget):
                 subprocess.Popen(["xdg-open", d])
 
     def _save_preset(self):
-        from PyQt6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Сохранить пресет", "Имя пресета:")
-        if ok and name:
-            cfg = self.collect_all_settings()
-            cfg["name"] = name
-            self._presets.append(cfg)
-            self.names_tab.refresh_presets(self._presets)
-            self.names_tab.preset_saved.emit()
+        name = name.strip()
+        if not (ok and name):
+            return
+        existing = next((p for p in self._presets if p.get("name") == name), None)
+        if existing is not None:
+            ans = QMessageBox.question(
+                self, "Пресет уже существует",
+                f"Пресет «{name}» уже есть. Перезаписать?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+            self._presets.remove(existing)
+        cfg = self.collect_all_settings()
+        cfg["name"] = name
+        self._presets.append(cfg)
+        self._refresh_preset_combo(select_name=name)
+        self.preset_saved.emit()
 
     def _load_preset(self):
-        p = self.names_tab.get_selected_preset()
+        name = self.cmb_presets.currentText()
+        p = next((p for p in self._presets if p.get("name") == name), None)
         if p:
             self.restore_all_settings(p)
 
     def _del_preset(self):
-        row = self.names_tab.lst_presets.currentRow()
-        if 0 <= row < len(self._presets):
-            self._presets.pop(row)
-            self.names_tab.refresh_presets(self._presets)
-            self.names_tab.preset_deleted.emit()
+        name = self.cmb_presets.currentText()
+        p = next((p for p in self._presets if p.get("name") == name), None)
+        if p is None:
+            return
+        ans = QMessageBox.question(
+            self, "Удалить пресет",
+            f"Удалить пресет «{name}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self._presets.remove(p)
+        self._refresh_preset_combo()
+        self.preset_deleted.emit()
+
+    def _refresh_preset_combo(self, presets: "list[dict] | None" = None, select_name: "str | None" = None):
+        if presets is not None:
+            self._presets = presets
+        self.cmb_presets.clear()
+        self.cmb_presets.addItems([p.get("name", "Без имени") for p in self._presets])
+        if select_name is not None:
+            idx = self.cmb_presets.findText(select_name)
+            if idx >= 0:
+                self.cmb_presets.setCurrentIndex(idx)
 
     def _connect_settings_signals(self, root: QWidget):
         preview_tabs = (self.basic_tab, self.spectral_tab, self.texture_tab, self.advanced_tab)
@@ -2441,6 +2440,7 @@ class ModifierPanel(QWidget):
         }
 
     def restore_all_settings(self, d: dict):
+        d = {**d, **d.get("methods", {})}
         self.basic_tab.set_values(d)
         self.spectral_tab.set_values(d)
         self.texture_tab.set_values(d)
@@ -2628,8 +2628,8 @@ class MainWindow(QMainWindow):
         self.modifier_panel.stop_requested.connect(self._stop)
         self.modifier_panel.preview_requested.connect(self._start_preview)
         self.converter_panel.start_requested.connect(self._start_converter)
-        self.modifier_panel.names_tab.preset_deleted.connect(self._save_config)
-        self.modifier_panel.names_tab.preset_saved.connect(self._save_config)
+        self.modifier_panel.preset_deleted.connect(self._save_config)
+        self.modifier_panel.preset_saved.connect(self._save_config)
 
         self._status = self.statusBar()
         self._status.showMessage("Готов")
@@ -2827,44 +2827,11 @@ class MainWindow(QMainWindow):
                 self.modifier_panel.restore_all_settings(cfg.get("settings", {}))
                 presets = cfg.get("presets", [])
                 if presets:
-                    self.modifier_panel._presets = presets
-                    self.modifier_panel.names_tab.refresh_presets(presets)
+                    self.modifier_panel._refresh_preset_combo(presets)
                 tpl_presets = cfg.get("template_presets", [])
                 if tpl_presets:
                     self.modifier_panel.names_tab.refresh_user_templates(tpl_presets)
                 self.file_panel._recent = cfg.get("recent_files", [])
-            # Дефолты, включающиеся всегда при старте
-            tt = self.modifier_panel.texture_tab
-            st = self.modifier_panel.spectral_tab
-
-            # Спектральный джиттер — аккуратный набор без слышимых артефактов
-            tt.cb_spec_jitter.setChecked(True)
-            tt.sp_sj_count.setValue(6)          # 6 нотчей — достаточно без перегруза
-            tt.sp_sj_att.setValue(7.0)          # 7 dB — ниже порога слышимости в музыке
-            tt.cb_sj_adaptive.setChecked(False)  # OFF: режет характерные частоты = слышимо
-            tt.cb_sj_temporal.setChecked(False)  # OFF: LFO создаёт pumping-эффект
-            tt.cb_sj_boost.setChecked(False)     # OFF: 6+ бустов накапливаются = неровная АЧХ
-            tt.cb_sj_noise.setChecked(True)     # субпороговый шум — −67 dBFS
-
-            # Дрейф дискретизации — 2 Гц совершенно неслышимо
-            st.cb_resamp.setChecked(True)
-            st.sp_resamp.setValue(2)
-            st.cb_drift_variable.setChecked(True)  # вибрато d=0.002 — на грани восприятия
-
-            # DC-смещение — полностью ниже порога слышимости
-            st.cb_dc.setChecked(True)
-            st.sp_dc.setValue(0.000005)
-
-            # Микросдвиг тональности — 4 цента, случайный знак
-            # Сдвигает все spectral peaks разом, делает все fingerprint-хэши невалидными
-            st.cb_micro_pitch.setChecked(True)
-            st.sp_micro_pitch.setValue(4.0)
-            st.cb_micro_pitch_rand.setChecked(True)
-
-            self.modifier_panel.advanced_tab.cb_broken.setChecked(True)
-            nt = self.modifier_panel.names_tab
-            nt._meta_override_fields["Название"].setText(" [vk.com/reuploadunder]")
-            nt._meta_append_checks["Название"].setChecked(True)
         except Exception:
             pass
 

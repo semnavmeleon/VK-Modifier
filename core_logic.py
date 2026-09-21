@@ -226,7 +226,6 @@ class TrackInfo:
                 self.genre  = (f.get('genre',  ['']) or [''])[0]
         except Exception:
             pass
-        # Cover art — MP3/ID3
         try:
             tags = ID3(self.file_path)
             for key in tags:
@@ -236,7 +235,6 @@ class TrackInfo:
                     break
         except Exception:
             pass
-        # Cover art — FLAC
         if not self.cover_data:
             try:
                 from mutagen.flac import FLAC
@@ -661,9 +659,6 @@ class ModificationWorker(threading.Thread):
         )
 
     def _build_micro_pitch_filter(self, cents, audio_path=None):
-        """Сдвигает высоту тона на cents центов (1 semitone = 100 cents).
-        4 cents — полностью ниже JND слуха, но сдвигает ВСЕ spectral peaks
-        одновременно, делая все fingerprint-хэши невалидными."""
         sr = self._get_sample_rate(audio_path) if audio_path else 44100
         shifted_sr = round(sr * (2 ** (cents / 1200)))
         return f"asetrate={shifted_sr},aresample={sr}:resampler=soxr:precision=28"
@@ -676,11 +671,6 @@ class ModificationWorker(threading.Thread):
 
     @staticmethod
     def _spread_frequencies(pool, n, min_octave_gap=0.5):
-        """
-        Выбирает n частот из pool с минимальным расстоянием min_octave_gap октав.
-        Если с ограничением не набрать n — снижает порог вдвое и пробует снова.
-        Если n > len(pool) — добирает оставшееся с небольшим случайным сдвигом (±3%).
-        """
         import math
         candidates = list(pool)
         random.shuffle(candidates)
@@ -695,10 +685,8 @@ class ModificationWorker(threading.Thread):
             return sel
 
         selected = _pick(min_octave_gap)
-        # Если не набрали — снижаем требование к расстоянию вдвое
         if len(selected) < n:
             selected = _pick(min_octave_gap / 2)
-        # Если всё равно не хватает (n > len(pool)) — добираем с ±3% сдвигом
         if len(selected) < n:
             rest = [f for f in candidates if f not in selected]
             selected.extend(rest[:n - len(selected)])
@@ -709,7 +697,6 @@ class ModificationWorker(threading.Thread):
         return selected
 
     def _find_spectral_peaks(self, audio_path, n):
-        """Return top-n peak frequencies from the track's spectrum."""
         freq_pool = [
              60,   80,  100,  120,  160,  200,  250,  315,
             400,  500,  630,  800, 1000, 1250, 1600, 2000,
@@ -723,7 +710,6 @@ class ModificationWorker(threading.Thread):
         return [e[0] for e in energies[:n]] or None
 
     def _build_asendcmd_filter(self, named_notches, audio_path):
-        """Write LFO-modulation commands for named equalizers; return asendcmd filter string."""
         duration = self._get_duration(audio_path) if audio_path else 0
         if not duration or duration <= 0:
             return None
@@ -753,7 +739,6 @@ class ModificationWorker(threading.Thread):
 
     @staticmethod
     def _build_shaped_noise_filter():
-        # Two pseudorandom streams, combined RMS ≈ -67 dBFS — subthreshold, inaudible
         return "aeval=0.00145*(random(0)-0.5)+0.00075*(random(1)-0.5):c=same"
 
     def _build_spectral_jitter_filter(self, num_notches=5, max_attenuation=15, fixed_frequencies=None,
@@ -773,12 +758,11 @@ class ModificationWorker(threading.Thread):
           10000, 11000, 12500, 14000, 16000, 18000, 19000, 20000,
         ]
 
-        # ── Ручной режим ────────────────────────────────────────────────
         if manual_config is not None and manual_config.get('mode') == 'manual':
             frequencies  = manual_config.get('frequencies', [])
             attenuations = manual_config.get('attenuations', [])
             widths       = manual_config.get('widths', [])
-            default_width = manual_config.get('fixed_width', 2.0)  # fix: было 0.2
+            default_width = manual_config.get('fixed_width', 2.0)
 
             for i, freq in enumerate(frequencies):
                 att   = attenuations[i] if i < len(attenuations) else max_attenuation
@@ -786,14 +770,12 @@ class ModificationWorker(threading.Thread):
                 filters.append(f"equalizer=f={freq}:width_type=q:width={width:.3f}:g=-{att:.1f}")
             return ", ".join(filters)
 
-        # ── Фиксированные частоты ────────────────────────────────────────
-        if fixed_frequencies:  # fix: None и [] ведут себя одинаково
+        if fixed_frequencies:
             selected = list(fixed_frequencies)
-            default_width = 2.0  # fix: было 0.2
+            default_width = 2.0
             if manual_config and 'fixed_width' in manual_config:
                 default_width = manual_config['fixed_width']
 
-            # fix: att вычисляется один раз с явным приоритетом
             if manual_config and 'fixed_attenuation' in manual_config:
                 att = manual_config['fixed_attenuation']
             elif fixed_attenuation is not None:
@@ -805,19 +787,17 @@ class ModificationWorker(threading.Thread):
                 filters.append(f"equalizer=f={freq}:width_type=q:width={default_width:.3f}:g=-{att:.1f}")
             return ", ".join(filters)
 
-        # ── Случайный режим ──────────────────────────────────────────────
         num_notches_int = int(round(num_notches))
         if num_notches_int <= 0:
             return ""
 
-        # Адаптивные частоты: атакуем реальные пики спектра трека
         if adaptive and audio_path and os.path.exists(audio_path):
             peaks = self._find_spectral_peaks(audio_path, num_notches_int)
             selected = peaks if peaks else self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
         else:
             selected = self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
 
-        named_notches = []  # [(label, freq, att_val, q)] for temporal_mod
+        named_notches = []
 
         for i, freq in enumerate(selected):
             att_val = fixed_attenuation if fixed_attenuation is not None \
@@ -833,7 +813,6 @@ class ModificationWorker(threading.Thread):
             else:
                 filters.append(f"equalizer=f={freq}:width_type=q:width={q:.2f}:g=-{att_val:.1f}")
 
-            # Компенсирующий микроподъём на F×1.5 — сохраняет баланс
             if compensate_boost:
                 boost_freq = min(int(round(freq * 1.5)), 20000)
                 bq = max(0.8, min(6.0, 2.0 + 0.4 * math.log2(boost_freq / 1000)))
@@ -841,7 +820,6 @@ class ModificationWorker(threading.Thread):
 
         result = ", ".join(filters)
 
-        # Временна́я модуляция: asendcmd-префикс для LFO ±1.5 dB
         if temporal_mod and named_notches:
             cmd_filter = self._build_asendcmd_filter(named_notches, audio_path)
             if cmd_filter:
@@ -1075,9 +1053,6 @@ class ModificationWorker(threading.Thread):
             return os.path.exists(file_path) and os.path.getsize(file_path) > 0
         return self._verify_mp3(file_path)
 
-    # ------------------------------------------------------------------
-    # Pipeline steps extracted from run()
-    # ------------------------------------------------------------------
 
     def _read_track_metadata(self, file_path, track_info):
         original_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -1523,9 +1498,6 @@ class ModificationWorker(threading.Thread):
                 except Exception as e:
                     self.on_error(f"Вшить текст: {e}")
 
-    # ------------------------------------------------------------------
-    # Main processing loop
-    # ------------------------------------------------------------------
 
     def run(self):
         success_count = 0
@@ -1566,6 +1538,17 @@ class ModificationWorker(threading.Thread):
                     current_input, ultrasonic_path, filters, cover_source_path, tags, output_file)
 
                 success, result = self._safe_subprocess_run(cmd, "main processing")
+
+                if success and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                    expected_duration = self._get_duration(current_input)
+                    actual_duration = self._get_duration(output_file)
+                    if expected_duration > 1 and actual_duration < expected_duration * 0.9:
+                        success = False
+                        self.on_error(
+                            f"{os.path.basename(file_path)}: результат обрезан "
+                            f"({actual_duration:.1f} сек вместо {expected_duration:.1f} сек) — "
+                            f"похоже, исходный файл повреждён"
+                        )
 
                 if success and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
                     self._apply_post_processing(output_file)
@@ -1631,13 +1614,13 @@ class ModificationWorker(threading.Thread):
         audio = MP3(file_path)
         if audio.tags is None:
             audio.add_tags()
-        if bug_type == 0:    # Очень большая (1 ч – 10 ч)
+        if bug_type == 0:
             fake_ms = random.randint(3_600_000, 36_000_000)
-        elif bug_type == 1:  # Очень маленькая (0.1 с – 3 с)
+        elif bug_type == 1:
             fake_ms = random.randint(100, 3_000)
-        elif bug_type == 2:  # Случайная (1 мин – 2 ч)
+        elif bug_type == 2:
             fake_ms = random.randint(60_000, 7_200_000)
-        else:                # Максимум
+        else:
             fake_ms = 16_777_215 * 1000
         audio.tags['TLEN'] = TLEN(encoding=3, text=str(fake_ms))
 
@@ -1656,14 +1639,14 @@ class ModificationWorker(threading.Thread):
                 frame_offset = vbr_pos + 8
                 real_frames = int.from_bytes(data[frame_offset: frame_offset + 4], 'big')
 
-                if bug_type == 0:    # Очень большая
+                if bug_type == 0:
                     mult = random.randint(50, 200)
                     fake_frames = min(real_frames * mult if real_frames > 0 else 0x00500000, 0xFFFFFF00)
-                elif bug_type == 1:  # Очень маленькая
+                elif bug_type == 1:
                     fake_frames = random.randint(1, 50)
-                elif bug_type == 2:  # Случайная
+                elif bug_type == 2:
                     fake_frames = random.randint(0x00100000, 0x00EFFFFF)
-                else:                # Максимум
+                else:
                     fake_frames = 0xFFFFFF00
 
                 data[frame_offset: frame_offset + 4] = fake_frames.to_bytes(4, 'big')
