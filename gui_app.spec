@@ -2,9 +2,12 @@
 
 
 a = Analysis(
-    ['gui_app.py'],
+    ['gui_qt.py'],
     pathex=[],
-    binaries=[],
+    binaries=[
+        ('ffmpeg.exe', '.'),
+        ('ffprobe.exe', '.'),
+    ],
     datas=[],
     hiddenimports=[],
     hookspath=[],

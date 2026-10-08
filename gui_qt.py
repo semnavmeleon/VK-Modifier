@@ -1095,11 +1095,20 @@ class TextureTab(QWidget):
         g.layout().addWidget(_row(QLabel("Глубина мод.:"), self.sp_infra_mod_depth, None))
         g.layout().addWidget(_row(QLabel("Фаза (рад.):"), self.sp_infra_phase, None))
         g.layout().addWidget(self.cb_infra_adaptive)
-        g.layout().addWidget(QLabel("Гармоники (h2, h3, h4):"))
+        self.lbl_infra_harm = QLabel("Гармоники (h2, h3, h4):")
+        g.layout().addWidget(self.lbl_infra_harm)
         g.layout().addWidget(_row(self.sp_infra_h1, self.sp_infra_h2, self.sp_infra_h3, None))
         lay.addWidget(g)
+        # Гармоники действуют только в режимах harmonic и maximum
+        self.cmb_infra_mode.currentTextChanged.connect(self._on_infra_mode)
+        self._on_infra_mode(self.cmb_infra_mode.currentText())
 
         lay.addStretch()
+
+    def _on_infra_mode(self, mode):
+        on = mode in ("harmonic", "maximum")
+        for w in (self.lbl_infra_harm, self.sp_infra_h1, self.sp_infra_h2, self.sp_infra_h3):
+            w.setEnabled(on)
 
     def _sync_sj_count(self):
         self.sp_sj_count.blockSignals(True)
@@ -1381,9 +1390,35 @@ class AdvancedTab(QWidget):
         g = _grp("Сломанная длительность (метаданные)")
         self.cb_broken = QCheckBox("Включить")
         self.cmb_broken = QComboBox()
-        self.cmb_broken.addItems(["Очень большая", "Очень маленькая", "Случайная", "Максимум"])
+        self.cmb_broken.addItems([
+            "Очень большая", "Очень маленькая", "Случайная", "Максимум",
+            "Пользовательская", "Нулевая", "Переполнение (overflow)"
+        ])
+        self.sp_broken_custom_h = _int(1, 0, 24)
+        self.sp_broken_custom_m = _int(0, 0, 59)
+        self.sp_broken_custom_s = _int(0, 0, 59)
+        self._broken_custom_row = _row(
+            QLabel("Ч:"), self.sp_broken_custom_h,
+            QLabel("М:"), self.sp_broken_custom_m,
+            QLabel("С:"), self.sp_broken_custom_s, None
+        )
+        self._broken_custom_row.hide()
+        self.cb_broken_toc = QCheckBox("Испортить TOC (таблицу поиска)")
+        self.cb_broken_toc.setToolTip("Перемешивает 100-байтную таблицу поиска Xing — ломает перемотку и seek")
+        self.cb_broken_lame = QCheckBox("Испортить LAME расширение (delay/padding)")
+        self.cb_broken_lame.setToolTip("Рандомизирует encoder delay и padding — сдвигает начало/конец трека для плеера")
+        self.cb_broken_vbri = QCheckBox("Испортить VBRI заголовок (если есть)")
+        self.cb_broken_vbri.setToolTip("Модифицирует VBRI заголовок (frames/bytes) — двойной конфликт с Xing")
+        self.cb_broken_multi_tlen = QCheckBox("Множественные TLEN + PRIV фреймы")
+        self.cb_broken_multi_tlen.setToolTip("Добавляет несколько конфликтующих фреймов длительности — плееры показывают разное")
         g.layout().addWidget(self.cb_broken)
         g.layout().addWidget(_row(QLabel("Тип:"), self.cmb_broken))
+        g.layout().addWidget(self._broken_custom_row)
+        g.layout().addWidget(self.cb_broken_toc)
+        g.layout().addWidget(self.cb_broken_lame)
+        g.layout().addWidget(self.cb_broken_vbri)
+        g.layout().addWidget(self.cb_broken_multi_tlen)
+        self.cmb_broken.currentIndexChanged.connect(self._on_broken_type)
         lay.addWidget(g)
 
         lay.addStretch()
@@ -1406,6 +1441,9 @@ class AdvancedTab(QWidget):
         if p:
             self.le_insert.setText(p)
 
+    def _on_broken_type(self, idx):
+        self._broken_custom_row.setVisible(idx == 4)
+
     def get_values(self) -> dict:
         return {
             "trim_silence": self.cb_trim.isChecked(),
@@ -1426,6 +1464,13 @@ class AdvancedTab(QWidget):
             "insert_position_sec": self.sp_insert_pos.value(),
             "broken_duration": self.cb_broken.isChecked(),
             "broken_type": self.cmb_broken.currentIndex(),
+            "broken_corrupt_toc": self.cb_broken_toc.isChecked(),
+            "broken_corrupt_lame": self.cb_broken_lame.isChecked(),
+            "broken_corrupt_vbri": self.cb_broken_vbri.isChecked(),
+            "broken_multi_tlen": self.cb_broken_multi_tlen.isChecked(),
+            "broken_custom_sec": (self.sp_broken_custom_h.value() * 3600
+                                  + self.sp_broken_custom_m.value() * 60
+                                  + self.sp_broken_custom_s.value()),
         }
 
     def set_values(self, d: dict):
@@ -1447,6 +1492,14 @@ class AdvancedTab(QWidget):
         self.sp_insert_pos.setValue(d.get("insert_position_sec", 10.0))
         self.cb_broken.setChecked(d.get("broken_duration", False))
         self.cmb_broken.setCurrentIndex(int(d.get("broken_type", 0)))
+        self.cb_broken_toc.setChecked(d.get("broken_corrupt_toc", False))
+        self.cb_broken_lame.setChecked(d.get("broken_corrupt_lame", False))
+        self.cb_broken_vbri.setChecked(d.get("broken_corrupt_vbri", False))
+        self.cb_broken_multi_tlen.setChecked(d.get("broken_multi_tlen", False))
+        total_sec = int(d.get("broken_custom_sec", 3600))
+        self.sp_broken_custom_h.setValue(total_sec // 3600)
+        self.sp_broken_custom_m.setValue((total_sec % 3600) // 60)
+        self.sp_broken_custom_s.setValue(total_sec % 60)
 
 
 class TechnicalTab(QWidget):
@@ -2147,6 +2200,9 @@ class ModifierPanel(QWidget):
         self.btn_stop.setFixedWidth(80)
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.stop_requested)
+        self.btn_preview = QPushButton("Предпросмотр")
+        self.btn_preview.setFixedWidth(120)
+        self.btn_preview.clicked.connect(self._on_preview_clicked)
         self.btn_open  = QPushButton("Открыть папку")
         self.btn_open.clicked.connect(self._open_out_dir)
         self.lbl_eta = QLabel("")
@@ -2154,6 +2210,7 @@ class ModifierPanel(QWidget):
         ah.addWidget(self.progress, 1)
         ah.addWidget(self.lbl_eta)
         ah.addStretch()
+        ah.addWidget(self.btn_preview)
         ah.addWidget(self.btn_open)
         ah.addWidget(self.btn_stop)
         ah.addWidget(self.btn_start)
@@ -2170,11 +2227,7 @@ class ModifierPanel(QWidget):
         self._current_filepath: str | None = None
         self._current_track = None
 
-        self._preview_timer = QTimer(self)
-        self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(0)
-        self._preview_timer.timeout.connect(self._on_preview_requested)
-        self._connect_settings_signals(self.tabs)
+        pass
 
     def _select_out_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения")
@@ -2243,23 +2296,7 @@ class ModifierPanel(QWidget):
             if idx >= 0:
                 self.cmb_presets.setCurrentIndex(idx)
 
-    def _connect_settings_signals(self, root: QWidget):
-        preview_tabs = (self.basic_tab, self.spectral_tab, self.texture_tab, self.advanced_tab)
-        for tab in preview_tabs:
-            for w in tab.findChildren(QCheckBox):
-                w.stateChanged.connect(self._schedule_preview)
-            for w in tab.findChildren(QSpinBox):
-                w.valueChanged.connect(self._schedule_preview)
-            for w in tab.findChildren(QDoubleSpinBox):
-                w.valueChanged.connect(self._schedule_preview)
-            for w in tab.findChildren(QComboBox):
-                w.currentIndexChanged.connect(self._schedule_preview)
-
-    def _schedule_preview(self):
-        if self._current_filepath:
-            self._preview_timer.start()
-
-    def _on_preview_requested(self):
+    def _on_preview_clicked(self):
         if not self._current_filepath:
             return
         settings  = self.collect_all_settings()
@@ -2423,6 +2460,11 @@ class ModifierPanel(QWidget):
             "insert_audio_path":      a["insert_audio_path"],
             "insert_position_sec":    a["insert_position_sec"],
             "broken_type":            a["broken_type"],
+            "broken_corrupt_toc":     a["broken_corrupt_toc"],
+            "broken_corrupt_lame":    a["broken_corrupt_lame"],
+            "broken_corrupt_vbri":    a["broken_corrupt_vbri"],
+            "broken_multi_tlen":      a["broken_multi_tlen"],
+            "broken_custom_sec":      a["broken_custom_sec"],
             "output_volume":          self.dial_volume.value() / 100.0,
             "lossless_intermediate":  sys_v["lossless_intermediate"],
             "max_workers":            sys_v["max_workers"],

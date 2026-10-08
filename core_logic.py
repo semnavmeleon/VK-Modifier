@@ -664,7 +664,7 @@ class ModificationWorker(threading.Thread):
         return f"asetrate={shifted_sr},aresample={sr}:resampler=soxr:precision=28"
 
     def _build_temporal_jitter_filter(self, intensity=0.002, frequency=0.5):
-        freq_clamped = max(0.1, min(20.0, frequency))
+        freq_clamped = max(0.1, min(2.0, frequency))
         delay = max(0.1, min(5.0, intensity * 2000))
         decay = min(0.3, intensity * 50)
         return f"aphaser=type=t:delay={delay:.2f}:decay={decay:.3f}:speed={freq_clamped:.2f}:out_gain=0.9"
@@ -696,7 +696,7 @@ class ModificationWorker(threading.Thread):
             selected.append(round(base * jitter))
         return selected
 
-    def _find_spectral_peaks(self, audio_path, n):
+    def _find_spectral_peaks(self, audio_path, n, min_octave_gap=0.5):
         freq_pool = [
              60,   80,  100,  120,  160,  200,  250,  315,
             400,  500,  630,  800, 1000, 1250, 1600, 2000,
@@ -706,8 +706,26 @@ class ModificationWorker(threading.Thread):
         energies = self._analyze_spectrum(audio_path, freq_pool)
         if not energies:
             return None
+        # Убираем общий наклон спектра (регрессия уровня по log-частоте), иначе бас всегда громче
+        if len(energies) >= 3:
+            xs = [math.log2(f) for f, _ in energies]
+            ys = [db for _, db in energies]
+            mx = sum(xs) / len(xs)
+            my = sum(ys) / len(ys)
+            sxx = sum((x - mx) ** 2 for x in xs)
+            slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx else 0.0
+            energies = [(f, db - (my + slope * (math.log2(f) - mx))) for f, db in energies]
         energies.sort(key=lambda x: x[1], reverse=True)
-        return [e[0] for e in energies[:n]] or None
+        # Берём самые выступающие над трендом частоты, разнося их по октавам; если не хватает — ослабляем разнос
+        picked = []
+        for gap in (min_octave_gap, min_octave_gap / 2, 0.0):
+            for freq, _ in energies:
+                if freq in picked or not all(abs(math.log2(freq / p)) >= gap for p in picked):
+                    continue
+                picked.append(freq)
+                if len(picked) >= n:
+                    return picked
+        return picked or None
 
     def _build_asendcmd_filter(self, named_notches, audio_path):
         duration = self._get_duration(audio_path) if audio_path else 0
@@ -724,7 +742,7 @@ class ModificationWorker(threading.Thread):
                 phase = i * (2 * math.pi / n)
                 mod = lfo_depth * math.sin(2 * math.pi * lfo_freq * t + phase)
                 gain = min(-0.3, -(base_att + mod))
-                lines.append(f"{t:.1f} {label} gain {gain:.2f}")
+                lines.append(f"{t:.1f} {label} gain {gain:.2f};")
             t += dt
         try:
             tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
@@ -739,7 +757,12 @@ class ModificationWorker(threading.Thread):
 
     @staticmethod
     def _build_shaped_noise_filter():
-        return "aeval=0.00145*(random(0)-0.5)+0.00075*(random(1)-0.5):c=same"
+        # random() в aeval даёт одинаковую последовательность для всех каналов,
+        # поэтому шум строится хэшем от номера сэмпла (n) и канала (ch): каналы независимые
+        def hash_noise(a, b):
+            return f"(mod(abs(sin(n*{a}+ch*{b}))*43758.5453\\,1)-0.5)"
+        noise = f"0.00145*{hash_noise(12.9898, 78.233)}+0.00075*{hash_noise(39.3468, 11.135)}"
+        return f"aeval=val(ch)+{noise}:c=same"
 
     def _build_spectral_jitter_filter(self, num_notches=5, max_attenuation=15, fixed_frequencies=None,
                                        fixed_attenuation=None, manual_config=None,
@@ -758,7 +781,10 @@ class ModificationWorker(threading.Thread):
           10000, 11000, 12500, 14000, 16000, 18000, 19000, 20000,
         ]
 
-        if manual_config is not None and manual_config.get('mode') == 'manual':
+        # Единый список нотчей (частота, ослабление dB, Q/ширина) для всех режимов
+        notches = []
+
+        if isinstance(manual_config, dict) and manual_config.get('mode') == 'manual':
             frequencies  = manual_config.get('frequencies', [])
             attenuations = manual_config.get('attenuations', [])
             widths       = manual_config.get('widths', [])
@@ -767,49 +793,52 @@ class ModificationWorker(threading.Thread):
             for i, freq in enumerate(frequencies):
                 att   = attenuations[i] if i < len(attenuations) else max_attenuation
                 width = widths[i]       if i < len(widths)       else default_width
-                filters.append(f"equalizer=f={freq}:width_type=q:width={width:.3f}:g=-{att:.1f}")
-            return ", ".join(filters)
+                notches.append((freq, att, width))
 
-        if fixed_frequencies:
-            selected = list(fixed_frequencies)
+        elif fixed_frequencies:
             default_width = 2.0
-            if manual_config and 'fixed_width' in manual_config:
+            if isinstance(manual_config, dict) and 'fixed_width' in manual_config:
                 default_width = manual_config['fixed_width']
 
-            if manual_config and 'fixed_attenuation' in manual_config:
+            if isinstance(manual_config, dict) and 'fixed_attenuation' in manual_config:
                 att = manual_config['fixed_attenuation']
             elif fixed_attenuation is not None:
                 att = fixed_attenuation
             else:
                 att = max_attenuation
 
-            for freq in selected:
-                filters.append(f"equalizer=f={freq}:width_type=q:width={default_width:.3f}:g=-{att:.1f}")
-            return ", ".join(filters)
+            for freq in fixed_frequencies:
+                notches.append((freq, att, default_width))
 
-        num_notches_int = int(round(num_notches))
-        if num_notches_int <= 0:
-            return ""
-
-        if adaptive and audio_path and os.path.exists(audio_path):
-            peaks = self._find_spectral_peaks(audio_path, num_notches_int)
-            selected = peaks if peaks else self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
         else:
-            selected = self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
+            num_notches_int = int(round(num_notches))
+            if num_notches_int <= 0:
+                return ""
+
+            if adaptive and audio_path and os.path.exists(audio_path):
+                selected = self._find_spectral_peaks(audio_path, num_notches_int, min_octave_gap) or []
+                # Если пиков не хватило, добираем равномерно распределёнными частотами
+                if len(selected) < num_notches_int:
+                    extra = [f for f in self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
+                             if f not in selected]
+                    selected += extra[:num_notches_int - len(selected)]
+            else:
+                selected = self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
+
+            for freq in selected:
+                att_val = fixed_attenuation if fixed_attenuation is not None \
+                          else random.uniform(max_attenuation / 2, max_attenuation)
+                q = max(0.8, min(6.0, 2.0 + 0.4 * math.log2(freq / 1000)))
+                q += random.uniform(-0.2, 0.2)
+                notches.append((freq, att_val, q))
 
         named_notches = []
 
-        for i, freq in enumerate(selected):
-            att_val = fixed_attenuation if fixed_attenuation is not None \
-                      else random.uniform(max_attenuation / 2, max_attenuation)
-
-            q = max(0.8, min(6.0, 2.0 + 0.4 * math.log2(freq / 1000)))
-            q += random.uniform(-0.2, 0.2)
-
+        for i, (freq, att_val, q) in enumerate(notches):
             if temporal_mod:
-                label = f"sj{i}"
-                filters.append(f"equalizer=f={freq}:width_type=q:width={q:.2f}:g=-{att_val:.1f}@{label}")
-                named_notches.append((f"equalizer@{label}", freq, att_val, q))
+                label = f"equalizer@sj{i}"
+                filters.append(f"{label}=f={freq}:width_type=q:width={q:.2f}:g=-{att_val:.1f}")
+                named_notches.append((label, freq, att_val, q))
             else:
                 filters.append(f"equalizer=f={freq}:width_type=q:width={q:.2f}:g=-{att_val:.1f}")
 
@@ -871,18 +900,19 @@ class ModificationWorker(threading.Thread):
                         h_arg = f"({h_arg}+{total_phase:.4f})"
                     terms.append(f"{amp * h_amp}*{wave_func(waveform, h_arg)}")
             expr = "+".join(terms)
+        elif mode == 'maximum':
+            mod_term = f"(1-{mod_depth}+{mod_depth}*sin(2*PI*{mod_freq}*t))"
+            terms = [f"{amp}*{mod_term}*{wave_func(waveform, base_arg)}"]
+            for i, h_amp in enumerate(harmonics, start=2):
+                if h_amp > 0:
+                    h_arg = f"2*PI*{freq * i}*t"
+                    if total_phase != 0:
+                        h_arg = f"({h_arg}+{total_phase:.4f})"
+                    terms.append(f"{amp * h_amp}*{mod_term}*{wave_func(waveform, h_arg)}")
+            expr = "+".join(terms)
         else:
             mod_term = f"(1-{mod_depth}+{mod_depth}*sin(2*PI*{mod_freq}*t))"
-            main_term = f"{amp}*{mod_term}*{wave_func(waveform, base_arg)}"
-            if harmonics and len(harmonics) > 0 and harmonics[0] > 0:
-                h2_amp = harmonics[0]
-                h2_arg = f"2*PI*{freq*2}*t"
-                if total_phase != 0:
-                    h2_arg = f"({h2_arg}+{total_phase:.4f})"
-                harm_term = f"{amp * h2_amp}*{mod_term}*{wave_func(waveform, h2_arg)}"
-                expr = f"{main_term}+{harm_term}"
-            else:
-                expr = main_term
+            expr = f"{amp}*{mod_term}*{wave_func(waveform, base_arg)}"
 
         return expr
 
@@ -1542,7 +1572,19 @@ class ModificationWorker(threading.Thread):
                 if success and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
                     expected_duration = self._get_duration(current_input)
                     actual_duration = self._get_duration(output_file)
-                    if expected_duration > 1 and actual_duration < expected_duration * 0.9:
+                    ratio = 0.9
+                    if self.settings['methods'].get('speed', False):
+                        spd = self.settings.get('speed_value', 1.0)
+                        if spd > 0:
+                            ratio = 0.9 / spd
+                    if self.settings['methods'].get('pitch', False):
+                        semitones = self.settings.get('pitch_value', 0)
+                        ratio = ratio / (2 ** (abs(semitones) / 12))
+                    if self.settings['methods'].get('cut_fragment', False):
+                        cut_dur = self.settings.get('cut_duration', 2)
+                        if expected_duration > 0:
+                            ratio = ratio * (1 - cut_dur / expected_duration)
+                    if expected_duration > 1 and actual_duration < expected_duration * ratio:
                         success = False
                         self.on_error(
                             f"{os.path.basename(file_path)}: результат обрезан "
@@ -1614,19 +1656,56 @@ class ModificationWorker(threading.Thread):
         audio = MP3(file_path)
         if audio.tags is None:
             audio.add_tags()
+
+        _24H_MS = 86_400_000
+        _24H_FRAMES = 3_311_539
+
         if bug_type == 0:
-            fake_ms = random.randint(3_600_000, 36_000_000)
+            fake_ms = random.randint(3_600_000, _24H_MS)
         elif bug_type == 1:
             fake_ms = random.randint(100, 3_000)
         elif bug_type == 2:
-            fake_ms = random.randint(60_000, 7_200_000)
+            fake_ms = random.randint(60_000, _24H_MS)
+        elif bug_type == 3:
+            fake_ms = _24H_MS
+        elif bug_type == 4:
+            fake_ms = min(int(self.settings.get('broken_custom_sec', 3600) * 1000), _24H_MS)
+        elif bug_type == 5:
+            fake_ms = 0
+        elif bug_type == 6:
+            fake_ms = random.choice([_24H_MS, _24H_MS - 1, _24H_MS + 1])
         else:
-            fake_ms = 16_777_215 * 1000
+            fake_ms = _24H_MS
+
         audio.tags['TLEN'] = TLEN(encoding=3, text=str(fake_ms))
 
+        if self.settings.get('broken_multi_tlen', False):
+            conflicting = [
+                random.randint(1000, min(fake_ms * 3, _24H_MS)),
+                random.randint(100, 5_000),
+                random.randint(min(fake_ms, _24H_MS // 2), _24H_MS),
+            ]
+            for i, val in enumerate(conflicting):
+                audio.tags[f'TXXX:DURATION_{i}'] = TXXX(
+                    encoding=3, desc=f'DURATION_{i}', text=str(val))
+            audio.tags['TXXX:LENGTH'] = TXXX(
+                encoding=3, desc='LENGTH', text=str(random.randint(1, _24H_MS)))
+            dur_bytes = min(random.randint(0, _24H_MS), _24H_MS).to_bytes(4, 'big')
+            audio.tags['PRIV:com.apple.streaming.transportStreamTimestamp'] = PRIV(
+                owner='com.apple.streaming.transportStreamTimestamp', data=dur_bytes)
+            audio.tags['PRIV:duration_ms'] = PRIV(
+                owner='duration_ms',
+                data=min(random.randint(0, _24H_MS), _24H_MS).to_bytes(4, 'big'))
+
         audio.save(v2_version=3)
+
         with open(file_path, 'rb') as f:
             data = bytearray(f.read())
+
+        modified = False
+        corrupt_toc = self.settings.get('broken_corrupt_toc', False)
+        corrupt_lame = self.settings.get('broken_corrupt_lame', False)
+        corrupt_vbri = self.settings.get('broken_corrupt_vbri', False)
 
         vbr_pos = data.find(b'Xing')
         if vbr_pos == -1:
@@ -1634,29 +1713,92 @@ class ModificationWorker(threading.Thread):
 
         if 0 < vbr_pos < len(data) - 120:
             flags = int.from_bytes(data[vbr_pos + 4: vbr_pos + 8], 'big')
+            offset = vbr_pos + 8
 
             if flags & 0x01:
-                frame_offset = vbr_pos + 8
-                real_frames = int.from_bytes(data[frame_offset: frame_offset + 4], 'big')
-
+                real_frames = int.from_bytes(data[offset: offset + 4], 'big')
                 if bug_type == 0:
-                    mult = random.randint(50, 200)
-                    fake_frames = min(real_frames * mult if real_frames > 0 else 0x00500000, 0xFFFFFF00)
+                    mult = random.randint(2, max(2, _24H_FRAMES // max(real_frames, 1)))
+                    fake_frames = min(real_frames * mult if real_frames > 0 else _24H_FRAMES, _24H_FRAMES)
                 elif bug_type == 1:
                     fake_frames = random.randint(1, 50)
                 elif bug_type == 2:
-                    fake_frames = random.randint(0x00100000, 0x00EFFFFF)
+                    fake_frames = random.randint(1000, _24H_FRAMES)
+                elif bug_type == 3:
+                    fake_frames = _24H_FRAMES
+                elif bug_type == 4:
+                    custom_sec = min(self.settings.get('broken_custom_sec', 3600), 86400)
+                    fake_frames = max(1, int(custom_sec * 44100 / 1152))
+                elif bug_type == 5:
+                    fake_frames = 0
+                elif bug_type == 6:
+                    fake_frames = _24H_FRAMES
                 else:
-                    fake_frames = 0xFFFFFF00
+                    fake_frames = _24H_FRAMES
+                data[offset: offset + 4] = (fake_frames & 0xFFFFFFFF).to_bytes(4, 'big')
+                offset += 4
+                modified = True
 
-                data[frame_offset: frame_offset + 4] = fake_frames.to_bytes(4, 'big')
+            if flags & 0x02:
+                if bug_type == 5:
+                    fake_bytes_val = 0
+                else:
+                    fake_bytes_val = random.randint(0x01000000, 0x7FFFFFFF)
+                data[offset: offset + 4] = fake_bytes_val.to_bytes(4, 'big')
+                offset += 4
+                modified = True
 
-                if flags & 0x02:
-                    byte_offset = frame_offset + 4
-                    fake_bytes = random.randint(0x01000000, 0x7FFFFFFF)
-                    data[byte_offset: byte_offset + 4] = fake_bytes.to_bytes(4, 'big')
+            if flags & 0x04:
+                if corrupt_toc and offset + 100 <= len(data):
+                    toc = list(data[offset: offset + 100])
+                    random.shuffle(toc)
+                    for _ in range(20):
+                        toc[random.randint(0, 99)] = random.choice([0, 255, random.randint(0, 255)])
+                    data[offset: offset + 100] = bytes(toc)
+                    modified = True
+                offset += 100
 
-        out_tmp = file_path + '.vkmod_out'
-        with open(out_tmp, 'wb') as f:
-            f.write(data)
-        os.replace(out_tmp, file_path)
+            if flags & 0x08:
+                offset += 4
+
+            if corrupt_lame:
+                lame_pos = -1
+                for tag in (b'LAME', b'Lavc', b'lavf'):
+                    lame_pos = data.find(tag, vbr_pos, vbr_pos + 200)
+                    if lame_pos > 0:
+                        break
+                if lame_pos > 0 and lame_pos + 36 <= len(data):
+                    delay_off = lame_pos + 21
+                    if delay_off + 3 <= len(data):
+                        fake_delay = random.randint(0, 4095)
+                        fake_pad = random.randint(0, 4095)
+                        data[delay_off] = (fake_delay >> 4) & 0xFF
+                        data[delay_off + 1] = ((fake_delay & 0x0F) << 4) | ((fake_pad >> 8) & 0x0F)
+                        data[delay_off + 2] = fake_pad & 0xFF
+                        modified = True
+
+        if corrupt_vbri:
+            vbri_pos = data.find(b'VBRI')
+            if 0 < vbri_pos < len(data) - 26:
+                if bug_type == 5:
+                    fake_vbri_frames = 0
+                    fake_vbri_bytes = 0
+                elif bug_type == 6:
+                    fake_vbri_frames = _24H_FRAMES
+                    fake_vbri_bytes = random.randint(0x01000000, 0x7FFFFFFF)
+                elif bug_type == 4:
+                    custom_sec = min(self.settings.get('broken_custom_sec', 3600), 86400)
+                    fake_vbri_frames = max(1, int(custom_sec * 44100 / 1152))
+                    fake_vbri_bytes = random.randint(0x01000000, 0x7FFFFFFF)
+                else:
+                    fake_vbri_frames = random.randint(1, _24H_FRAMES)
+                    fake_vbri_bytes = random.randint(0x01000000, 0x7FFFFFFF)
+                data[vbri_pos + 10: vbri_pos + 14] = fake_vbri_bytes.to_bytes(4, 'big')
+                data[vbri_pos + 14: vbri_pos + 18] = fake_vbri_frames.to_bytes(4, 'big')
+                modified = True
+
+        if modified:
+            out_tmp = file_path + '.vkmod_out'
+            with open(out_tmp, 'wb') as f:
+                f.write(data)
+            os.replace(out_tmp, file_path)
