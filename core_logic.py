@@ -639,6 +639,7 @@ class ModificationWorker(threading.Thread):
         if cfg['eq_high'] != 0:
             filters.append(f"treble=g={cfg['eq_high']}:f=8000:width_type=q:width=0.7")
 
+        filters.append("alimiter=limit=0.98:attack=5:release=50")
         return ", ".join(filters)
 
     def _build_midside_filter(self, mid_eq_gain=-3, side_eq_gain=2):
@@ -1250,13 +1251,15 @@ class ModificationWorker(threading.Thread):
         if not os.path.exists(extra):
             return current_input
         overlay_vol = self.settings.get('overlay_volume', 0.5)
+        original_volume = max(0.5, 1.0 - overlay_vol * 0.5)
         overlay_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
         overlay_temp.close()
         temp_files.append(overlay_temp.name)
         fc = (
-            f"[0:a]volume=1.0[main];"
+            f"[0:a]volume={original_volume:.4f}[main];"
             f"[1:a]volume={overlay_vol:.4f}[extra];"
-            f"[main][extra]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[out]"
+            f"[main][extra]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+            f"alimiter=limit=0.98:attack=5:release=50[out]"
         )
         cmd = [
             'ffmpeg', '-i', current_input, '-i', extra,
@@ -1322,22 +1325,31 @@ class ModificationWorker(threading.Thread):
             return current_input
         sample_rate = self._get_sample_rate(current_input) or 44100
         amplitude = self.settings.get('vk_infrasonic_amplitude', 0.35)
-        if self.settings.get('vk_infrasonic_adaptive_amplitude', True):
-            peak = self._get_peak_amplitude(current_input)
-            if peak > 0:
-                headroom_factor = max(0.3, (0.98 - peak) / 0.98)
-                amplitude = amplitude * headroom_factor
+        peak = self._get_peak_amplitude(current_input)
+        if self.settings.get('vk_infrasonic_adaptive_amplitude', True) and peak > 0:
+            max_infra_amp = max(0.005, (0.98 - peak * 0.95) * 0.85)
+            amplitude = min(amplitude, max_infra_amp)
+        if peak > 0:
+            original_volume = min(0.97, max(0.5, (0.98 - amplitude) / peak))
+        else:
+            original_volume = 0.95
         local_vk = {**self.settings, 'vk_infrasonic_amplitude': amplitude}
         expr_l = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.0)
         expr_r = self._get_vk_infrasonic_expr(local_vk, extra_phase=0.5236)
+        fade_in = min(1.0, duration * 0.02)
+        fade_out = min(1.0, duration * 0.02)
+        fade_env = f"min(t/{fade_in:.4f},1)*min(({duration:.4f}-t)/{fade_out:.4f},1)"
+        expr_l = f"({fade_env})*({expr_l})"
+        expr_r = f"({fade_env})*({expr_r})"
         vk_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
         vk_temp.close()
         temp_files.append(vk_temp.name)
         fc = (
-            f"[0:a]volume=0.97[main];"
-            f"aevalsrc='{expr_l}|{expr_r}':c=stereo:s={sample_rate}[infra];"
+            f"[0:a]volume={original_volume:.4f}[main];"
+            f"aevalsrc='{expr_l}|{expr_r}':c=stereo:s={sample_rate}:d={duration:.4f}[infra];"
             f"[main][infra]amix=inputs=2:duration=first:"
-            f"dropout_transition=0:normalize=0[out]"
+            f"dropout_transition=0:normalize=0,"
+            f"alimiter=limit=0.98:attack=5:release=50[out]"
         )
         cmd_vk = [
             'ffmpeg', '-i', current_input,
@@ -1440,7 +1452,7 @@ class ModificationWorker(threading.Thread):
         if has_ultrasonic:
             cmd.extend(['-i', ultrasonic_path])
             cover_idx = 2
-            amix = "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0"
+            amix = "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.98:attack=5:release=50"
             fc = f"{amix}[_mixed];[_mixed]{filters}[_out]" if filters else f"{amix}[_out]"
             if cover_source_path:
                 cmd.extend(['-i', cover_source_path])
