@@ -23,6 +23,72 @@ FORMAT_CODECS = {
     'mka': 'libvorbis', 'oga': 'flac', 'caf': 'pcm_s16le', 'shn': 'shorten',
 }
 
+# Форматы, для которых в ffmpeg нет энкодера (только декодеры)
+NON_ENCODABLE_FORMATS = {'ape', 'mpc', 'shn'}
+
+# Обход VK перестаёт работать, если поддельная длительность оказывается меньше
+# часа, поэтому «большие» типы не опускаются ниже _MIN_FAKE_SEC.
+_MIN_FAKE_SEC = 3600
+_MAX_FAKE_SEC = 86400
+# ffmpeg считает длительность по Xing чуть короче заявленной (сам Xing-кадр не
+# аудиоданные, плюс стартовое смещение): ровно 3600 с он отдаёт как 3599.97.
+# Запас в секунду гарантирует, что пол в один час не будет провален на доли.
+_FLOOR_GUARD_SEC = 1
+# Типы, для которых пол в один час обязателен. «Очень маленькая» (1) и
+# «Нулевая» (5) намеренно дают крошечные значения и в список не входят.
+_BIG_FAKE_TYPES = frozenset({0, 2, 3, 4, 6})
+
+# Таблицы частот дискретизации по версии MPEG (индекс — sr_index из заголовка).
+# У MPEG1 в кадре 1152 сэмпла, у MPEG2/2.5 — 576: без этого поддельная
+# длительность на 22050/24000/16000/11025/8000 Гц уходит ровно вдвое.
+_MP3_SAMPLE_RATES = {
+    3: (44100, 48000, 32000),   # MPEG1
+    2: (22050, 24000, 16000),   # MPEG2
+    0: (11025, 12000, 8000),    # MPEG2.5
+}
+
+
+def _mp3_frame_geometry(data, frame_start):
+    """Возвращает (sample_rate, samples_per_frame) по заголовку аудиофрейма."""
+    if (frame_start + 4 <= len(data)
+            and data[frame_start] == 0xFF
+            and (data[frame_start + 1] & 0xE0) == 0xE0):
+        hdr = int.from_bytes(data[frame_start:frame_start + 4], 'big')
+        version = (hdr >> 19) & 0x03
+        sr_index = (hdr >> 10) & 0x03
+        rates = _MP3_SAMPLE_RATES.get(version)
+        if rates and sr_index < 3:
+            return rates[sr_index], (1152 if version == 3 else 576)
+    return 44100, 1152
+
+
+def _fake_duration_sec(bug_type, custom_sec):
+    """Целевая поддельная длительность в секундах для выбранного типа."""
+    try:
+        custom_sec = float(custom_sec)
+    except (TypeError, ValueError):
+        custom_sec = _MIN_FAKE_SEC
+    floor = _MIN_FAKE_SEC + _FLOOR_GUARD_SEC
+    if bug_type == 0:        # Очень большая
+        return random.uniform(6 * 3600, _MAX_FAKE_SEC)
+    if bug_type == 1:        # Очень маленькая
+        return random.uniform(0.1, 3.0)
+    if bug_type == 2:        # Случайная
+        return random.uniform(floor, _MAX_FAKE_SEC)
+    if bug_type == 3:        # Максимум
+        return float(_MAX_FAKE_SEC)
+    if bug_type == 4:        # Пользовательская
+        return min(max(custom_sec, floor), _MAX_FAKE_SEC)
+    if bug_type == 5:        # Нулевая
+        return 0.0
+    return float(_MAX_FAKE_SEC)  # 6 — Переполнение и всё неизвестное
+
+
+# Общий лок и реестр зарезервированных имён: параллельные воркеры
+# не должны выбирать один и тот же выходной путь
+_PATH_LOCK = threading.Lock()
+_RESERVED_PATHS = set()
+
 _RANDOM_TITLES = [
     "очень красивый треугольный мальчик",
     "Даниил Глубоких наступил на шиншиллу за это он попадет в ад",
@@ -357,13 +423,15 @@ class BatchConverter:
         elif self.output_format == 'ac3':
             args.extend(['-codec:a', codec, '-b:a', '448k'])
         elif self.output_format == 'dts':
-            args.extend(['-codec:a', codec, '-b:a', '1536k'])
+            # энкодер dca в ffmpeg помечен экспериментальным
+            args.extend(['-codec:a', codec, '-strict', '-2', '-b:a', '1536k'])
         elif self.output_format == 'mp2':
             args.extend(['-codec:a', codec, '-b:a', '256k'])
         elif self.output_format == 'mpc':
             args.extend(['-codec:a', codec, '-q:a', '7'])
         elif self.output_format == 'spx':
-            args.extend(['-codec:a', codec, '-q:a', '8'])
+            # libspeex поддерживает только 8/16/32 кГц — иначе ошибка на любом обычном треке
+            args.extend(['-codec:a', codec, '-ar', '16000', '-ac', '1', '-q:a', '8'])
         elif self.output_format == 'amr':
             args.extend(['-codec:a', codec, '-ar', '8000', '-ac', '1', '-b:a', '12.2k'])
         elif self.output_format == 'mka':
@@ -378,19 +446,28 @@ class BatchConverter:
         total = len(self.files)
         self.queue.put(('progress', idx + 1, total, file_path))
 
+        if self.output_format in NON_ENCODABLE_FORMATS:
+            self.queue.put(('file_done', file_path, False, ""))
+            self.queue.put(('error',
+                f"Ошибка конвертации {os.path.basename(file_path)}: формат "
+                f"{self.output_format.upper()} не поддерживается — в ffmpeg нет энкодера"))
+            return
+
         try:
             base_name = os.path.splitext(os.path.basename(file_path))[0]
-            output_name = f"{base_name}.{self.output_format}"
-            output_path = os.path.join(self.output_dir, output_name)
 
-            counter = 1
-            while os.path.exists(output_path):
-                output_name = f"{base_name}_{counter}.{self.output_format}"
+            with _PATH_LOCK:
+                output_name = f"{base_name}.{self.output_format}"
                 output_path = os.path.join(self.output_dir, output_name)
-                counter += 1
+                counter = 1
+                while os.path.exists(output_path) or output_path in _RESERVED_PATHS:
+                    output_name = f"{base_name}_{counter}.{self.output_format}"
+                    output_path = os.path.join(self.output_dir, output_name)
+                    counter += 1
+                _RESERVED_PATHS.add(output_path)
 
             args = self._get_ffmpeg_args(file_path, output_path)
-            result = subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL, encoding='utf-8', errors='ignore', timeout=300)
+            result = subprocess.run(args, capture_output=True, stdin=subprocess.DEVNULL, encoding='utf-8', errors='ignore', timeout=1800)
 
             if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 if self.delete_originals:
@@ -438,6 +515,8 @@ class ModificationWorker(threading.Thread):
         self.on_error = on_error or (lambda *a: None)
         self.start_index = start_index
         self._stop_event = stop_event or threading.Event()
+        self._run_temp_files = []
+        self._xing_conflict_warned = False
 
     @staticmethod
     def _safe_filename(s):
@@ -475,9 +554,9 @@ class ModificationWorker(threading.Thread):
         result_text = '\n'.join(error_lines)
         return result_text[-chars:] if len(result_text) > chars else result_text
 
-    def _safe_subprocess_run(self, cmd, description="", allow_fail=False):
+    def _safe_subprocess_run(self, cmd, description="", allow_fail=False, timeout=900):
         try:
-            result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, encoding='utf-8', errors='ignore', timeout=300)
+            result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, encoding='utf-8', errors='ignore', timeout=timeout)
             if result.returncode != 0 and not allow_fail:
                 err = self._extract_ffmpeg_error(result.stderr)
                 self.on_error(f"FFmpeg ошибка ({description}):\n{err}")
@@ -496,9 +575,8 @@ class ModificationWorker(threading.Thread):
         cmd = [
             'ffmpeg', '-i', main_track, '-i', extra_track,
             '-filter_complex', '[0:a][1:a]concat=n=2:v=0:a=1[out]',
-            '-map', '[out]', '-codec:a', 'libmp3lame', '-q:a', '2',
-            '-y', output_path
-        ]
+            '-map', '[out]'
+        ] + self._temp_codec() + ['-y', output_path]
         self._safe_subprocess_run(cmd, "alternative merge", allow_fail=True)
 
     def _get_duration(self, file_path):
@@ -554,9 +632,10 @@ class ModificationWorker(threading.Thread):
         try:
             import numpy as np
             sample_rate = 44100
+            max_samples = 1 << 20  # ~23.8 с — предел размера FFT
             cmd = ['ffmpeg', '-i', audio_path, '-vn', '-f', 'f32le',
                    '-ac', '1', '-ar', str(sample_rate), 'pipe:1', '-y']
-            result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=300)
             if result.returncode != 0 or not result.stdout:
                 return self._analyze_spectrum_ffmpeg(audio_path, bands)
 
@@ -564,9 +643,10 @@ class ModificationWorker(threading.Thread):
             if len(samples) < sample_rate:
                 return self._analyze_spectrum_ffmpeg(audio_path, bands)
 
-            samples = samples[:sample_rate * 30]
+            samples = np.asarray(samples[:max_samples], dtype=np.float64)
+            # Окно Ханна убирает утечку спектра от прямоугольного окна
+            samples = samples * np.hanning(len(samples))
             fft_size = 1 << (len(samples) - 1).bit_length()
-            fft_size = min(fft_size, 1 << 20)
             spectrum = np.abs(np.fft.rfft(samples, n=fft_size)) ** 2
             freqs = np.fft.rfftfreq(fft_size, d=1.0 / sample_rate)
 
@@ -576,11 +656,12 @@ class ModificationWorker(threading.Thread):
                 high = center * 1.4
                 mask = (freqs >= low) & (freqs <= high)
                 if mask.any():
-                    rms = float(np.sqrt(np.mean(spectrum[mask])))
-                    if rms > 0:
-                        rms_db = 10 * np.log10(rms)
-                        if rms_db > -80:
-                            band_energies.append((center, rms_db))
+                    power = float(np.mean(spectrum[mask]))
+                    if power > 0:
+                        # spectrum — мощность, поэтому 10*log10 (не от sqrt)
+                        power_db = 10 * np.log10(power)
+                        if power_db > -80:
+                            band_energies.append((center, power_db))
             return band_energies or None
 
         except ImportError:
@@ -591,17 +672,16 @@ class ModificationWorker(threading.Thread):
     def _analyze_spectrum_ffmpeg(self, audio_path, bands):
         band_energies = []
         for center_freq in bands:
+            width = max(2, center_freq // 4)
             cmd = [
                 'ffmpeg', '-i', audio_path,
-                '-af', f'bandpass=f={center_freq}:width={center_freq // 4}:csg=1,astats=measure=RMS',
+                '-af', f'bandpass=f={center_freq}:width={width}:csg=1,astats=metadata=0',
                 '-f', 'null', '-'
             ]
             success, result = self._safe_subprocess_run(cmd, f"analyzing {center_freq}Hz", allow_fail=True)
             if success and result and result.stderr:
-                m = re.search(r'RMS level dB:\s*([-\d.]+)', result.stderr)
-                if not m:
-                    m = re.search(r'RMS level:\s*([-\d.]+)', result.stderr)
-                if m:
+                m = re.search(r'RMS level dB:\s*(-?[\d.]+|-?inf)', result.stderr)
+                if m and 'inf' not in m.group(1):
                     rms_db = float(m.group(1))
                     if rms_db > -80:
                         band_energies.append((center_freq, rms_db))
@@ -643,13 +723,18 @@ class ModificationWorker(threading.Thread):
         return ", ".join(filters)
 
     def _build_midside_filter(self, mid_eq_gain=-3, side_eq_gain=2):
-        mid_lin  = 10 ** (mid_eq_gain  / 20)
-        side_lin = 10 ** (side_eq_gain / 20)
+        # mlev/slev у stereotools — ЛИНЕЙНЫЕ множители (диапазон [0.015625, 64], default 1),
+        # поэтому dB корректно переводим в линейные и клампим по диапазону фильтра
+        mid_lin  = 10 ** (float(mid_eq_gain) / 20)
+        side_lin = 10 ** (float(side_eq_gain) / 20)
+        mid_lin  = max(0.015625, min(64.0, mid_lin))
+        side_lin = max(0.015625, min(64.0, side_lin))
         return f"stereotools=mlev={mid_lin:.4f}:slev={side_lin:.4f}"
 
     def _build_psychoacoustic_noise_filter(self, intensity=0.0003):
-        decay = min(0.01 + intensity * 50, 0.15)
-        return f"aecho=0.9:0.9:1:{decay:.3f}"
+        # intensity трактуем как линейную амплитуду шума (диапазон GUI 1e-5..5e-3)
+        amplitude = max(1e-5, min(0.05, float(intensity)))
+        return self._build_shaped_noise_filter(amplitude=amplitude)
 
     def _build_saturation_filter(self, drive=1.5, mix=0.15):
         mix_clamped = max(0.0, min(1.0, mix))
@@ -662,7 +747,10 @@ class ModificationWorker(threading.Thread):
     def _build_micro_pitch_filter(self, cents, audio_path=None):
         sr = self._get_sample_rate(audio_path) if audio_path else 44100
         shifted_sr = round(sr * (2 ** (cents / 1200)))
-        return f"asetrate={shifted_sr},aresample={sr}:resampler=soxr:precision=28"
+        # asetrate+aresample меняют и питч, и длительность — возвращаем темп через atempo
+        tempo_comp = 2 ** (-cents / 1200)
+        return (f"asetrate={shifted_sr},aresample={sr}:resampler=soxr:precision=28,"
+                f"atempo={tempo_comp:.6f}")
 
     def _build_temporal_jitter_filter(self, intensity=0.002, frequency=0.5):
         freq_clamped = max(0.1, min(2.0, frequency))
@@ -671,10 +759,62 @@ class ModificationWorker(threading.Thread):
         return f"aphaser=type=t:delay={delay:.2f}:decay={decay:.3f}:speed={freq_clamped:.2f}:out_gain=0.9"
 
     @staticmethod
-    def _spread_frequencies(pool, n, min_octave_gap=0.5):
+    def _atempo_factors(speed):
+        # одиночный atempo поддерживает 0.5..100; вне диапазона раскладываем в цепочку
+        factors = []
+        s = max(1e-3, float(speed))
+        while s < 0.5:
+            factors.append(0.5)
+            s /= 0.5
+        while s > 100.0:
+            factors.append(100.0)
+            s /= 100.0
+        factors.append(s)
+        return factors
+
+    def _measure_loudnorm(self, audio_path, target):
+        try:
+            cmd = ['ffmpeg', '-i', audio_path,
+                   '-af', f'loudnorm=I={target:.1f}:TP=-1.5:LRA=11:print_format=json',
+                   '-f', 'null', '-']
+            success, result = self._safe_subprocess_run(cmd, "loudnorm measure", allow_fail=True)
+            if not (success and result and result.stderr):
+                return None
+            m = re.search(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr, re.S)
+            if not m:
+                return None
+            stats = json.loads(m.group(0))
+            if float(stats.get('input_i', -70.0)) <= -69.9:
+                return None
+            return stats
+        except Exception:
+            return None
+
+    def _build_loudnorm_filter(self, target, audio_path):
+        # Двухпроходный linear-режим: без измерений loudnorm работает динамически
+        # (pumping) и всегда ресемплит выход в 192 кГц
+        stats = None
+        if audio_path and os.path.exists(audio_path):
+            stats = self._measure_loudnorm(audio_path, target)
+        if stats:
+            try:
+                return (f"loudnorm=I={target:.1f}:TP=-1.5:LRA=11"
+                        f":measured_I={float(stats['input_i']):.2f}"
+                        f":measured_TP={float(stats['input_tp']):.2f}"
+                        f":measured_LRA={float(stats['input_lra']):.2f}"
+                        f":measured_thresh={float(stats['input_thresh']):.2f}"
+                        f":offset={float(stats['target_offset']):.2f}"
+                        f":linear=true")
+            except (KeyError, TypeError, ValueError):
+                pass
+        return f"loudnorm=I={target:.1f}:TP=-1.5:LRA=11"
+
+    @staticmethod
+    def _spread_frequencies(pool, n, min_octave_gap=0.5, rng=None):
         import math
+        rng = rng or random
         candidates = list(pool)
-        random.shuffle(candidates)
+        rng.shuffle(candidates)
 
         def _pick(gap):
             sel = []
@@ -692,8 +832,8 @@ class ModificationWorker(threading.Thread):
             rest = [f for f in candidates if f not in selected]
             selected.extend(rest[:n - len(selected)])
         while len(selected) < n:
-            base = random.choice(pool)
-            jitter = random.uniform(0.97, 1.03)
+            base = rng.choice(pool)
+            jitter = rng.uniform(0.97, 1.03)
             selected.append(round(base * jitter))
         return selected
 
@@ -745,24 +885,33 @@ class ModificationWorker(threading.Thread):
                 gain = min(-0.3, -(base_att + mod))
                 lines.append(f"{t:.1f} {label} gain {gain:.2f};")
             t += dt
+        return self._write_cmd_file(lines)
+
+    def _write_cmd_file(self, lines):
+        """Пишет файл команд для asendcmd и возвращает строку фильтра (или None).
+
+        Файл регистрируется во временных файла́х прогона, чтобы run() его удалил.
+        """
+        if not lines:
+            return None
         try:
             tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
             tmp.write('\n'.join(lines))
             tmp.close()
-            temp_files = getattr(self, '_run_temp_files', [])
-            temp_files.append(tmp.name)
+            getattr(self, '_run_temp_files', []).append(tmp.name)
             safe = tmp.name.replace('\\', '/').replace(':', '\\:')
             return f"asendcmd=filename='{safe}'"
         except Exception:
             return None
 
     @staticmethod
-    def _build_shaped_noise_filter():
+    def _build_shaped_noise_filter(amplitude=0.0022):
         # random() в aeval даёт одинаковую последовательность для всех каналов,
         # поэтому шум строится хэшем от номера сэмпла (n) и канала (ch): каналы независимые
         def hash_noise(a, b):
             return f"(mod(abs(sin(n*{a}+ch*{b}))*43758.5453\\,1)-0.5)"
-        noise = f"0.00145*{hash_noise(12.9898, 78.233)}+0.00075*{hash_noise(39.3468, 11.135)}"
+        amp = max(1e-6, float(amplitude))
+        noise = f"{amp * 0.66:.8f}*{hash_noise(12.9898, 78.233)}+{amp * 0.34:.8f}*{hash_noise(39.3468, 11.135)}"
         return f"aeval=val(ch)+{noise}:c=same"
 
     def _build_spectral_jitter_filter(self, num_notches=5, max_attenuation=15, fixed_frequencies=None,
@@ -771,8 +920,9 @@ class ModificationWorker(threading.Thread):
                                        audio_path=None, adaptive=False,
                                        compensate_boost=False, temporal_mod=False):
         import math
-        if seed is not None:
-            random.seed(seed)
+        # Локальный RNG: глобальный random.seed() в параллельных тредах
+        # менял бы «случайные» значения у других файлов (тайтлы и т.п.)
+        rng = random.Random(seed)
 
         filters = []
         freq_pool = [
@@ -820,17 +970,17 @@ class ModificationWorker(threading.Thread):
                 selected = self._find_spectral_peaks(audio_path, num_notches_int, min_octave_gap) or []
                 # Если пиков не хватило, добираем равномерно распределёнными частотами
                 if len(selected) < num_notches_int:
-                    extra = [f for f in self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
+                    extra = [f for f in self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap, rng)
                              if f not in selected]
                     selected += extra[:num_notches_int - len(selected)]
             else:
-                selected = self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap)
+                selected = self._spread_frequencies(freq_pool, num_notches_int, min_octave_gap, rng)
 
             for freq in selected:
                 att_val = fixed_attenuation if fixed_attenuation is not None \
-                          else random.uniform(max_attenuation / 2, max_attenuation)
+                          else rng.uniform(max_attenuation / 2, max_attenuation)
                 q = max(0.8, min(6.0, 2.0 + 0.4 * math.log2(freq / 1000)))
-                q += random.uniform(-0.2, 0.2)
+                q += rng.uniform(-0.2, 0.2)
                 notches.append((freq, att_val, q))
 
         named_notches = []
@@ -856,6 +1006,84 @@ class ModificationWorker(threading.Thread):
                 result = cmd_filter + "," + result
 
         return result
+
+    def _build_fp_jitter_eq(self, rng, audio_path):
+        """Плотный банк мелких полосовых коррекций с медленной модуляцией усиления.
+
+        Полосы не перекрываются (ширина ≈ 1.4 шага), поэтому случайные
+        усиления не складываются и общий уровень/тембр почти не меняется.
+        """
+        bands = max(4, min(48, int(self.settings.get('fp_jitter_bands', 20))))
+        depth = max(0.2, min(6.0, float(self.settings.get('fp_jitter_depth', 1.5))))
+        mod_rate = max(0.01, min(1.0, float(self.settings.get('fp_jitter_mod_rate', 0.1))))
+
+        fmin, fmax = 80.0, 16000.0
+        spacing = math.log2(fmax / fmin) / max(bands - 1, 1)
+        width = spacing * 1.4
+
+        rows = []
+        for i in range(bands):
+            f = fmin * 2.0 ** (i * spacing)
+            g = rng.uniform(-depth, depth)
+            rows.append((f"fpj{i}", f, g))
+
+        chain = ", ".join(
+            f"equalizer@{lbl}=f={f:.2f}:width_type=o:width={width:.4f}:g={g:.2f}"
+            for lbl, f, g in rows)
+
+        if not self.settings.get('fp_jitter_mod', True):
+            return chain
+        duration = self._get_duration(audio_path) if audio_path else 0
+        if not duration or duration <= 0:
+            return chain
+
+        # цель команды обязана быть 'equalizer@<имя>': просто '<имя>' ffmpeg
+        # молча игнорирует, а 'equalizer' бьёт только по первому совпадению
+        dt = 0.5 if duration <= 300 else 1.0
+        lines = []
+        for lbl, _f, g in rows:
+            rate = rng.uniform(mod_rate * 0.6, mod_rate * 1.7)
+            phase = rng.uniform(0, 2 * math.pi)
+            t = 0.0
+            while t <= duration + dt:
+                gain = g + depth * 0.8 * math.sin(2 * math.pi * rate * t + phase)
+                lines.append(f"{t:.2f} equalizer@{lbl} gain {gain:.2f};")
+                t += dt
+        cmd = self._write_cmd_file(lines)
+        return f"{cmd},{chain}" if cmd else chain
+
+    def _build_fp_jitter_filter(self, audio_path):
+        """Сдвиг временной базы + плотный мелкий EQ.
+
+        Замерено на chromaprint (bench_fingerprint.py): глубокие нотчи
+        (7.5–15 дБ) меняют тембр на 4.3 дБ и оставляют сходство отпечатка 0.91,
+        тогда как сдвиг временной базы на 0.5% меняет тембр на 0.1 дБ и даёт
+        0.80 — ломает отпечаток сильнее почти без слышимых последствий.
+        """
+        rng = random.Random()
+        parts = []
+
+        mode = self.settings.get('fp_jitter_time_mode', 'random')
+        if mode not in ('detune', 'tempo'):
+            mode = rng.choice(('detune', 'tempo'))
+
+        # знак и величина случайны на каждый трек, но не меньше 40% от заданного
+        # максимума — иначе часть файлов получит сдвиг около нуля и не изменится
+        if mode == 'detune':
+            limit = max(0.05, min(3.0, float(self.settings.get('fp_jitter_detune_pct', 0.6))))
+            pct = rng.choice((-1.0, 1.0)) * rng.uniform(limit * 0.4, limit)
+            sr = self._get_sample_rate(audio_path) if audio_path else 44100
+            parts.append(f"asetrate={sr * (1 + pct / 100.0):.4f},"
+                         f"aresample={sr}:resampler=soxr:precision=28")
+        else:
+            limit = max(0.5, min(10.0, float(self.settings.get('fp_jitter_tempo_pct', 3.0))))
+            pct = rng.choice((-1.0, 1.0)) * rng.uniform(limit * 0.4, limit)
+            parts.append(f"rubberband=tempo={1 + pct / 100.0:.5f}")
+
+        eq = self._build_fp_jitter_eq(rng, audio_path)
+        if eq:
+            parts.append(eq)
+        return ", ".join(parts) if parts else None
 
     def _get_vk_infrasonic_expr(self, settings, extra_phase=0.0):
         freq = settings.get('vk_infrasonic_freq', 18.0)
@@ -1010,17 +1238,20 @@ class ModificationWorker(threading.Thread):
             )
             if spec_jitter:
                 filters.append(spec_jitter)
-            if self.settings.get('sj_noise', False):
-                filters.append(self._build_shaped_noise_filter())
 
         if self.settings['methods'].get('loudnorm', False):
             target = self.settings.get('loudnorm_target', -14.0)
-            filters.append(f"loudnorm=I={target:.1f}:TP=-1.5:LRA=11")
+            ln = self._build_loudnorm_filter(target, current_input)
+            if ln:
+                filters.append(ln)
 
         if self.settings['methods'].get('resample_drift', False):
-            drift = self.settings.get('resample_drift_amount', 1)
+            # дрейф в процентах: старая единица «Гц» давала 1/44100 = 0.002%,
+            # то есть метод фактически ничего не делал
+            drift_pct = max(-2.0, min(2.0, float(self.settings.get('resample_drift_amount', 0.3))))
             sr = self._get_sample_rate(current_input) if current_input else 44100
-            filters.append(f"asetrate={sr + drift},aresample={sr}:resampler=soxr:precision=28")
+            filters.append(f"asetrate={sr * (1 + drift_pct / 100.0):.4f},"
+                           f"aresample={sr}:resampler=soxr:precision=28")
 
         if self.settings.get('drift_variable', False):
             filters.append("vibrato=f=0.08:d=0.002")
@@ -1049,13 +1280,20 @@ class ModificationWorker(threading.Thread):
             filters.append(f"adelay=0|{int(round(delay_ms))}")
 
         if self.settings['methods'].get('pitch', False):
-            semitones = self.settings['pitch_value']
+            semitones = max(-12.0, min(12.0, float(self.settings.get('pitch_value', 0))))
             sr = self._get_sample_rate(current_input) if current_input else 44100
             rate = sr * (2 ** (semitones / 12))
-            filters.append(f"asetrate={rate:.0f},aresample={sr}")
+            # asetrate+aresample — varispeed: без atempo меняется и длительность
+            tempo_comp = 2 ** (-semitones / 12)
+            filters.append(f"asetrate={rate:.0f},aresample={sr},atempo={tempo_comp:.6f}")
 
         if self.settings['methods'].get('speed', False):
-            filters.append(f"atempo={self.settings['speed_value']}")
+            spd = float(self.settings.get('speed_value', 1.0))
+            if spd > 0:
+                for factor in self._atempo_factors(spd):
+                    filters.append(f"atempo={factor:.6f}")
+            else:
+                self.on_error("Speed: коэффициент должен быть больше 0, метод пропущен")
 
         if self.settings['methods'].get('eq', False):
             if self.settings.get('eq_type') == 1:
@@ -1066,10 +1304,9 @@ class ModificationWorker(threading.Thread):
             else:
                 filters.append(f"equalizer=f=1000:width_type=o:width=2:g={-self.settings['eq_value']}")
 
-        if self.settings['methods'].get('silence', False):
-            filters.append(f"apad=pad_dur={self.settings['silence_duration']}")
-
-        return ", ".join(filters) if filters else None
+        # apad (silence) добавляется последним в _compute_filters — после фейда,
+        # чтобы фейд приходился на музыку, а не на дописанную тишину
+        return filters
 
     def _temp_ext(self):
         return '.wav' if self.settings.get('lossless_intermediate', False) else '.mp3'
@@ -1081,7 +1318,13 @@ class ModificationWorker(threading.Thread):
 
     def _verify_audio(self, file_path):
         if file_path.endswith('.wav'):
-            return os.path.exists(file_path) and os.path.getsize(file_path) > 0
+            try:
+                if not (os.path.exists(file_path) and os.path.getsize(file_path) > 44):
+                    return False
+                with open(file_path, 'rb') as f:
+                    return f.read(4) == b'RIFF'
+            except Exception:
+                return False
         return self._verify_mp3(file_path)
 
 
@@ -1132,13 +1375,15 @@ class ModificationWorker(threading.Thread):
         except (KeyError, ValueError, IndexError):
             output_filename = f"VK_{i+1:03d}_custom.mp3"
 
-        output_file = os.path.join(self.output_dir, output_filename)
         base_fn = os.path.splitext(output_filename)[0]
-        col = 1
-        while os.path.exists(output_file):
-            output_filename = f"{base_fn}_{col}.mp3"
+        with _PATH_LOCK:
             output_file = os.path.join(self.output_dir, output_filename)
-            col += 1
+            col = 1
+            while os.path.exists(output_file) or output_file in _RESERVED_PATHS:
+                output_filename = f"{base_fn}_{col}.mp3"
+                output_file = os.path.join(self.output_dir, output_filename)
+                col += 1
+            _RESERVED_PATHS.add(output_file)
         return output_file
 
     def _apply_cut_fragment(self, current_input, temp_files):
@@ -1190,9 +1435,12 @@ class ModificationWorker(threading.Thread):
                       '-f', 'null', '-']
         ok, res = self._safe_subprocess_run(detect_cmd, "silence detect", allow_fail=True)
         if ok and res and res.stderr:
-            match = re.search(r'silence_end:\s*([\d.]+)', res.stderr)
-            if match:
-                silence_end = float(match.group(1))
+            # обрезать можно только ВЕДУЩУЮ тишину: первый интервал должен начинаться у нуля,
+            # иначе silence_end может указать на паузу в середине трека
+            starts = re.findall(r'silence_start:\s*(-?[\d.]+)', res.stderr)
+            ends = re.findall(r'silence_end:\s*([\d.]+)', res.stderr)
+            if starts and ends and float(starts[0]) <= 0.3:
+                silence_end = float(ends[0])
         if silence_end <= 0:
             return current_input
         silence_end = min(silence_end, trim_dur)
@@ -1231,16 +1479,16 @@ class ModificationWorker(threading.Thread):
         concat_list.write(f"file '{norm2.name.replace(chr(92), '/')}'\n")
         concat_list.close()
         temp_files.append(concat_list.name)
-        merge_temp = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
+        merge_temp = tempfile.NamedTemporaryFile(suffix=self._temp_ext(), delete=False)
         merge_temp.close()
         temp_files.append(merge_temp.name)
         success, _ = self._safe_subprocess_run(
-            ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list.name,
-             '-codec:a', 'libmp3lame', '-q:a', '2', '-y', merge_temp.name], "concat wav")
-        if success and self._verify_mp3(merge_temp.name):
+            ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list.name]
+            + self._temp_codec() + ['-y', merge_temp.name], "concat wav")
+        if success and self._verify_audio(merge_temp.name):
             return merge_temp.name
         self._try_alternative_merge(current_input, extra_track, temp_files, merge_temp.name)
-        if os.path.exists(merge_temp.name) and self._verify_mp3(merge_temp.name):
+        if os.path.exists(merge_temp.name) and self._verify_audio(merge_temp.name):
             return merge_temp.name
         return current_input
 
@@ -1288,11 +1536,13 @@ class ModificationWorker(threading.Thread):
         extra_norm.close()
         temp_files.append(extra_norm.name)
 
+        # все три части приводим к 44100/стерео — concat-demuxer требует
+        # одинаковых параметров потоков, иначе щелчки/рассинхрон на стыках
         s1, _ = self._safe_subprocess_run(
-            ['ffmpeg', '-i', current_input, '-t', str(insert_pos)]
+            ['ffmpeg', '-i', current_input, '-t', str(insert_pos), '-ar', '44100', '-ac', '2']
             + self._temp_codec() + ['-y', part1.name], "insert part1")
         s2, _ = self._safe_subprocess_run(
-            ['ffmpeg', '-i', current_input, '-ss', str(insert_pos)]
+            ['ffmpeg', '-i', current_input, '-ss', str(insert_pos), '-ar', '44100', '-ac', '2']
             + self._temp_codec() + ['-y', part2.name], "insert part2")
         se, _ = self._safe_subprocess_run(
             ['ffmpeg', '-i', extra, '-ar', '44100', '-ac', '2']
@@ -1327,10 +1577,13 @@ class ModificationWorker(threading.Thread):
         amplitude = self.settings.get('vk_infrasonic_amplitude', 0.35)
         peak = self._get_peak_amplitude(current_input)
         if self.settings.get('vk_infrasonic_adaptive_amplitude', True) and peak > 0:
-            max_infra_amp = max(0.005, (0.98 - peak * 0.95) * 0.85)
+            # реальный запас громкости до 0.98; без запаса инфразвук добавляется минимально
+            max_infra_amp = max(0.02, (0.98 - peak) * 0.9)
             amplitude = min(amplitude, max_infra_amp)
         if peak > 0:
-            original_volume = min(0.97, max(0.5, (0.98 - amplitude) / peak))
+            # громкость музыки подбираем так, чтобы сумма music+infra не вышла за 0.98;
+            # тихие треки не глушим (верхняя граница 1.0, а не 0.97)
+            original_volume = max(0.3, min(1.0, (0.98 - amplitude) / peak))
         else:
             original_volume = 0.95
         local_vk = {**self.settings, 'vk_infrasonic_amplitude': amplitude}
@@ -1369,35 +1622,58 @@ class ModificationWorker(threading.Thread):
         ultrasonic_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
         ultrasonic_temp.close()
         temp_files.append(ultrasonic_temp.name)
-        freq = self.settings.get('ultrasonic_freq', 21000)
+        freq = float(self.settings.get('ultrasonic_freq', 21000))
         level = self.settings.get('ultrasonic_level', 0.001)
         duration = self._get_duration(current_input)
+        sr = self._get_sample_rate(current_input) or 44100
+        # MP3 (LAME) режет всё выше ~18.5 кГц — маркер 21+ кГц не переживает кодирование.
+        # Опускаем частоту в диапазон, который кодек ещё воспроизводит.
+        max_freq = min(17000.0, sr / 2 - 500)
+        if freq > max_freq:
+            self.on_error(
+                f"Ультразвук: {freq:.0f} Гц не выживает в MP3 (кодек режет выше ~18 кГц) — "
+                f"частота снижена до {max_freq:.0f} Гц")
+            freq = max_freq
+        if freq <= 0 or duration <= 0:
+            return None
         if duration > 0:
             ok_ultra, _ = self._safe_subprocess_run(
                 ['ffmpeg', '-f', 'lavfi',
-                 '-i', f'sine=frequency={freq}:sample_rate=44100:duration={duration}',
+                 '-i', f'sine=frequency={freq:.1f}:sample_rate={sr}:duration={duration:.4f}',
                  '-af', f'volume={level}', '-y', ultrasonic_temp.name],
                 "ultrasonic", allow_fail=True)
             if ok_ultra and os.path.exists(ultrasonic_temp.name) and os.path.getsize(ultrasonic_temp.name) > 0:
                 return ultrasonic_temp.name
             if not ok_ultra:
-                self.on_error(f"Ультразвук: не удалось сгенерировать сигнал {freq} Гц")
+                self.on_error(f"Ультразвук: не удалось сгенерировать сигнал {freq:.0f} Гц")
         return None
 
     def _compute_filters(self, current_input):
-        filters = self._build_filters(current_input)
+        filters = list(self._build_filters(current_input))
         if self.settings['methods'].get('fade_out', False):
             fade_dur = self.settings.get('fade_duration', 5)
             duration = self._get_duration(current_input)
+            # atempo меняет таймлайн — старт фейда считаем по длительности после speed
+            if self.settings['methods'].get('speed', False):
+                spd = float(self.settings.get('speed_value', 1.0))
+                if spd > 0:
+                    duration = duration / spd
             if duration > 0:
                 fade_start = max(0, duration - fade_dur)
-                fade_f = f"afade=t=out:st={fade_start}:d={fade_dur}"
-                filters = f"{filters},{fade_f}" if filters else fade_f
+                filters.append(f"afade=t=out:st={fade_start:.3f}:d={fade_dur}")
         vol = self.settings.get('output_volume', 1.0)
         if abs(vol - 1.0) > 0.001:
-            vol_f = f"volume={vol:.4f}"
-            filters = f"{filters},{vol_f}" if filters else vol_f
-        return filters
+            filters.append(f"volume={vol:.4f}")
+        # дописка тишины — строго последней, после фейда
+        if self.settings['methods'].get('silence', False):
+            filters.append(f"apad=pad_dur={self.settings['silence_duration']}")
+        # fp_jitter меняет временну́ю базу, поэтому ставится самым последним:
+        # тогда рассчитанные выше тайминги фейдов не разъезжаются
+        if self.settings['methods'].get('fp_jitter', False):
+            fpj = self._build_fp_jitter_filter(current_input)
+            if fpj:
+                filters.append(fpj)
+        return ", ".join(filters) if filters else None
 
     def _extract_cover(self, track_info, temp_files):
         if self.settings.get('selected_cover_path') and os.path.exists(self.settings['selected_cover_path']):
@@ -1508,7 +1784,16 @@ class ModificationWorker(threading.Thread):
             cmd.extend(['-dither_method', dither])
 
         if self.settings['methods'].get('frame_shift', False):
-            cmd.extend(['-write_xing', '0'])
+            if self.settings['methods'].get('broken_duration', False):
+                # без Xing/Info поддельная длительность не применяется вообще:
+                # плееры и VK считают время по кадрам. Приоритет у broken_duration.
+                if not self._xing_conflict_warned:
+                    self._xing_conflict_warned = True
+                    self.on_error(
+                        "«Удалить Xing/Info заголовок» проигнорирован: он отменяет "
+                        "«Сломанную длительность» (без Xing подделка не применяется)")
+            else:
+                cmd.extend(['-write_xing', '0'])
 
         cmd.extend(['-id3v2_version', '3', '-y', output_file])
         return cmd
@@ -1579,7 +1864,7 @@ class ModificationWorker(threading.Thread):
                 cmd = self._build_ffmpeg_cmd(
                     current_input, ultrasonic_path, filters, cover_source_path, tags, output_file)
 
-                success, result = self._safe_subprocess_run(cmd, "main processing")
+                success, result = self._safe_subprocess_run(cmd, "main processing", timeout=1800)
 
                 if success and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
                     expected_duration = self._get_duration(current_input)
@@ -1589,9 +1874,7 @@ class ModificationWorker(threading.Thread):
                         spd = self.settings.get('speed_value', 1.0)
                         if spd > 0:
                             ratio = 0.9 / spd
-                    if self.settings['methods'].get('pitch', False):
-                        semitones = self.settings.get('pitch_value', 0)
-                        ratio = ratio / (2 ** (abs(semitones) / 12))
+                    # pitch теперь компенсируется через atempo — длительность не меняется
                     if self.settings['methods'].get('cut_fragment', False):
                         cut_dur = self.settings.get('cut_duration', 2)
                         if expected_duration > 0:
@@ -1664,50 +1947,69 @@ class ModificationWorker(threading.Thread):
             audio.tags.update_to_v23()
             audio.save()
 
+    @staticmethod
+    def _find_first_audio_frame(data):
+        """Оффсет первого аудиофрейма: сразу за ID3-тегом.
+
+        Если размер тега расходится с реальным sync-словом, доискиваемся его
+        рядом — иначе Xing/Info не находится и длительность не подделывается.
+        """
+        frame_start = 0
+        if bytes(data[:3]) == b'ID3' and len(data) > 10:
+            tag_size = ((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) | \
+                       ((data[8] & 0x7F) << 7) | (data[9] & 0x7F)
+            frame_start = min(10 + tag_size, max(0, len(data) - 600))
+
+        def is_sync(pos):
+            return (pos + 1 < len(data)
+                    and data[pos] == 0xFF and (data[pos + 1] & 0xE0) == 0xE0)
+
+        if not is_sync(frame_start):
+            limit = min(len(data) - 1, frame_start + 8192)
+            pos = frame_start
+            while pos < limit:
+                if is_sync(pos):
+                    return pos
+                pos += 1
+        return frame_start
+
     def _apply_broken_duration(self, file_path, bug_type):
         audio = MP3(file_path)
         if audio.tags is None:
             audio.add_tags()
 
         _24H_MS = 86_400_000
-        _24H_FRAMES = 3_311_539
 
-        if bug_type == 0:
-            fake_ms = random.randint(3_600_000, _24H_MS)
-        elif bug_type == 1:
-            fake_ms = random.randint(100, 3_000)
-        elif bug_type == 2:
-            fake_ms = random.randint(60_000, _24H_MS)
-        elif bug_type == 3:
-            fake_ms = _24H_MS
-        elif bug_type == 4:
-            fake_ms = min(int(self.settings.get('broken_custom_sec', 3600) * 1000), _24H_MS)
-        elif bug_type == 5:
-            fake_ms = 0
-        elif bug_type == 6:
+        fake_sec = _fake_duration_sec(
+            bug_type, self.settings.get('broken_custom_sec', _MIN_FAKE_SEC))
+        fake_ms = math.ceil(fake_sec * 1000)
+        if bug_type == 6:
+            # переполнение: качаем значение вокруг границы суток на ±1 мс
             fake_ms = random.choice([_24H_MS, _24H_MS - 1, _24H_MS + 1])
-        else:
-            fake_ms = _24H_MS
 
         audio.tags['TLEN'] = TLEN(encoding=3, text=str(fake_ms))
 
         if self.settings.get('broken_multi_tlen', False):
+            # конфликтующие значения держим в тех же границах, что и основное, —
+            # иначе плеер может вытащить отсюда длительность меньше часа
+            lo = ((_MIN_FAKE_SEC + _FLOOR_GUARD_SEC) * 1000
+                  if bug_type in _BIG_FAKE_TYPES else 100)
             conflicting = [
-                random.randint(1000, min(fake_ms * 3, _24H_MS)),
-                random.randint(100, 5_000),
-                random.randint(min(fake_ms, _24H_MS // 2), _24H_MS),
+                random.randint(lo, max(lo, min(fake_ms * 3, _24H_MS))),
+                random.randint(lo, max(lo, _24H_MS // 2)),
+                random.randint(min(max(fake_ms, lo), _24H_MS), _24H_MS),
             ]
             for i, val in enumerate(conflicting):
                 audio.tags[f'TXXX:DURATION_{i}'] = TXXX(
                     encoding=3, desc=f'DURATION_{i}', text=str(val))
             audio.tags['TXXX:LENGTH'] = TXXX(
-                encoding=3, desc='LENGTH', text=str(random.randint(1, _24H_MS)))
-            dur_bytes = min(random.randint(0, _24H_MS), _24H_MS).to_bytes(4, 'big')
+                encoding=3, desc='LENGTH', text=str(random.randint(lo, _24H_MS)))
+            dur_bytes = random.randint(lo, _24H_MS).to_bytes(4, 'big')
             audio.tags['PRIV:com.apple.streaming.transportStreamTimestamp'] = PRIV(
                 owner='com.apple.streaming.transportStreamTimestamp', data=dur_bytes)
             audio.tags['PRIV:duration_ms'] = PRIV(
                 owner='duration_ms',
-                data=min(random.randint(0, _24H_MS), _24H_MS).to_bytes(4, 'big'))
+                data=random.randint(lo, _24H_MS).to_bytes(4, 'big'))
 
         audio.save(v2_version=3)
 
@@ -1719,59 +2021,72 @@ class ModificationWorker(threading.Thread):
         corrupt_lame = self.settings.get('broken_corrupt_lame', False)
         corrupt_vbri = self.settings.get('broken_corrupt_vbri', False)
 
-        vbr_pos = data.find(b'Xing')
-        if vbr_pos == -1:
-            vbr_pos = data.find(b'Info')
+        # Xing/Info/VBRI живут только в первом аудиофрейме сразу после ID3-тега.
+        # Поиск по всему файлу может найти эти байты внутри аудиоданных и испортить их.
+        frame_start = self._find_first_audio_frame(data)
+        search_end = min(len(data) - 120, frame_start + 400)
 
-        if 0 < vbr_pos < len(data) - 120:
+        header_sr, samples_per_frame = _mp3_frame_geometry(data, frame_start)
+        # округление вверх: иначе ровно час кадров превращается в 3599.97 с
+        max_frames = math.ceil(_MAX_FAKE_SEC * header_sr / samples_per_frame)
+        fake_frames = math.ceil(fake_sec * header_sr / samples_per_frame)
+        fake_frames = min(max(fake_frames, 0), max_frames)
+
+        vbr_pos = data.find(b'Xing', frame_start, search_end)
+        if vbr_pos == -1:
+            vbr_pos = data.find(b'Info', frame_start, search_end)
+
+        if vbr_pos >= 0:
             flags = int.from_bytes(data[vbr_pos + 4: vbr_pos + 8], 'big')
-            offset = vbr_pos + 8
+
+            real_frames = 0
+            real_bytes = 0
+            frames_offset = bytes_offset = toc_offset = -1
+            cursor = vbr_pos + 8
 
             if flags & 0x01:
-                real_frames = int.from_bytes(data[offset: offset + 4], 'big')
-                if bug_type == 0:
-                    mult = random.randint(2, max(2, _24H_FRAMES // max(real_frames, 1)))
-                    fake_frames = min(real_frames * mult if real_frames > 0 else _24H_FRAMES, _24H_FRAMES)
-                elif bug_type == 1:
-                    fake_frames = random.randint(1, 50)
-                elif bug_type == 2:
-                    fake_frames = random.randint(1000, _24H_FRAMES)
-                elif bug_type == 3:
-                    fake_frames = _24H_FRAMES
-                elif bug_type == 4:
-                    custom_sec = min(self.settings.get('broken_custom_sec', 3600), 86400)
-                    fake_frames = max(1, int(custom_sec * 44100 / 1152))
-                elif bug_type == 5:
-                    fake_frames = 0
-                elif bug_type == 6:
-                    fake_frames = _24H_FRAMES
-                else:
-                    fake_frames = _24H_FRAMES
-                data[offset: offset + 4] = (fake_frames & 0xFFFFFFFF).to_bytes(4, 'big')
-                offset += 4
+                frames_offset = cursor
+                real_frames = int.from_bytes(data[cursor: cursor + 4], 'big')
+                cursor += 4
+            if flags & 0x02:
+                bytes_offset = cursor
+                real_bytes = int.from_bytes(data[cursor: cursor + 4], 'big')
+                cursor += 4
+            if flags & 0x04:
+                toc_offset = cursor
+
+            if frames_offset >= 0:
+                data[frames_offset: frames_offset + 4] = fake_frames.to_bytes(4, 'big')
                 modified = True
 
-            if flags & 0x02:
-                if bug_type == 5:
+            if bytes_offset >= 0:
+                # bytes держим согласованным с frames через реальный средний
+                # размер кадра: случайное значение уводит часть плееров
+                # (и транскодер VK) на совершенно другую длительность.
+                # Но ниже размера аудиопотока опускаться нельзя: ffmpeg
+                # отбрасывает Xing целиком, если header_filesize заметно
+                # меньше файла, и тогда длительность не подделывается вовсе
+                # (случай длинного исходника и более короткой подделки).
+                if fake_frames == 0:
                     fake_bytes_val = 0
                 else:
-                    fake_bytes_val = random.randint(0x01000000, 0x7FFFFFFF)
-                data[offset: offset + 4] = fake_bytes_val.to_bytes(4, 'big')
-                offset += 4
+                    if real_frames > 0 and real_bytes > 0:
+                        fake_bytes_val = int(fake_frames * real_bytes / real_frames)
+                    else:
+                        fake_bytes_val = real_bytes
+                    fake_bytes_val = max(fake_bytes_val,
+                                         max(len(data) - frame_start, 0) + 1024)
+                fake_bytes_val = min(max(fake_bytes_val, 0), 0xFFFFFFFE)
+                data[bytes_offset: bytes_offset + 4] = fake_bytes_val.to_bytes(4, 'big')
                 modified = True
 
-            if flags & 0x04:
-                if corrupt_toc and offset + 100 <= len(data):
-                    toc = list(data[offset: offset + 100])
-                    random.shuffle(toc)
-                    for _ in range(20):
-                        toc[random.randint(0, 99)] = random.choice([0, 255, random.randint(0, 255)])
-                    data[offset: offset + 100] = bytes(toc)
-                    modified = True
-                offset += 100
-
-            if flags & 0x08:
-                offset += 4
+            if corrupt_toc and toc_offset >= 0 and toc_offset + 100 <= len(data):
+                toc = list(data[toc_offset: toc_offset + 100])
+                random.shuffle(toc)
+                for _ in range(20):
+                    toc[random.randint(0, 99)] = random.choice([0, 255, random.randint(0, 255)])
+                data[toc_offset: toc_offset + 100] = bytes(toc)
+                modified = True
 
             if corrupt_lame:
                 lame_pos = -1
@@ -1790,24 +2105,29 @@ class ModificationWorker(threading.Thread):
                         modified = True
 
         if corrupt_vbri:
-            vbri_pos = data.find(b'VBRI')
-            if 0 < vbri_pos < len(data) - 26:
-                if bug_type == 5:
-                    fake_vbri_frames = 0
+            vbri_pos = data.find(b'VBRI', frame_start, min(len(data) - 26, frame_start + 400))
+            if vbri_pos >= 0:
+                real_vbri_bytes = int.from_bytes(data[vbri_pos + 10: vbri_pos + 14], 'big')
+                real_vbri_frames = int.from_bytes(data[vbri_pos + 14: vbri_pos + 18], 'big')
+                if fake_frames == 0:
                     fake_vbri_bytes = 0
-                elif bug_type == 6:
-                    fake_vbri_frames = _24H_FRAMES
-                    fake_vbri_bytes = random.randint(0x01000000, 0x7FFFFFFF)
-                elif bug_type == 4:
-                    custom_sec = min(self.settings.get('broken_custom_sec', 3600), 86400)
-                    fake_vbri_frames = max(1, int(custom_sec * 44100 / 1152))
-                    fake_vbri_bytes = random.randint(0x01000000, 0x7FFFFFFF)
                 else:
-                    fake_vbri_frames = random.randint(1, _24H_FRAMES)
-                    fake_vbri_bytes = random.randint(0x01000000, 0x7FFFFFFF)
+                    if real_vbri_frames > 0 and real_vbri_bytes > 0:
+                        fake_vbri_bytes = int(fake_frames * real_vbri_bytes / real_vbri_frames)
+                    else:
+                        fake_vbri_bytes = real_vbri_bytes
+                    fake_vbri_bytes = max(fake_vbri_bytes,
+                                          max(len(data) - frame_start, 0) + 1024)
+                fake_vbri_bytes = min(max(fake_vbri_bytes, 0), 0xFFFFFFFE)
                 data[vbri_pos + 10: vbri_pos + 14] = fake_vbri_bytes.to_bytes(4, 'big')
-                data[vbri_pos + 14: vbri_pos + 18] = fake_vbri_frames.to_bytes(4, 'big')
+                data[vbri_pos + 14: vbri_pos + 18] = fake_frames.to_bytes(4, 'big')
                 modified = True
+
+        if not modified:
+            self.on_error(
+                f"{os.path.basename(file_path)}: Xing/Info/VBRI заголовок не найден — "
+                f"поддельная длительность попала только в TLEN, "
+                f"большинство плееров её игнорирует")
 
         if modified:
             out_tmp = file_path + '.vkmod_out'

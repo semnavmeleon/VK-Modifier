@@ -44,11 +44,11 @@ SUPPORTED_FORMATS = {
     "mp3": "MP3 (lossy)", "flac": "FLAC (lossless)", "wav": "WAV (lossless)",
     "ogg": "OGG Vorbis (lossy)", "aac": "AAC (lossy)", "m4a": "M4A AAC (lossy)",
     "wma": "WMA (lossy)", "opus": "Opus (lossy)", "aiff": "AIFF (lossless)",
-    "alac": "ALAC (lossless)", "wv": "WavPack", "ape": "Monkey's Audio",
+    "alac": "ALAC (lossless)", "wv": "WavPack",
     "tta": "TrueAudio", "ac3": "AC3/Dolby", "dts": "DTS",
-    "mp2": "MPEG Layer 2", "mpc": "Musepack", "spx": "Speex",
+    "mp2": "MPEG Layer 2", "spx": "Speex",
     "amr": "AMR", "au": "AU/Sun", "mka": "Matroska",
-    "oga": "Ogg FLAC", "caf": "Core Audio", "shn": "Shorten",
+    "oga": "Ogg FLAC", "caf": "Core Audio",
 }
 
 QUALITY_PRESETS = {
@@ -113,6 +113,10 @@ def _hline() -> QFrame:
 
 def _sep() -> QFrame:
     return _hline()
+
+
+# порядок пунктов combobox «Сдвиг базы» в методе Fingerprint jitter
+_FPJ_MODES = ("random", "detune", "tempo")
 
 
 class WorkerThread(QThread):
@@ -799,11 +803,16 @@ class SpectralTab(QWidget):
 
         g = _grp("Дрейф частоты дискретизации")
         self.cb_resamp = QCheckBox("Включить")
-        self.sp_resamp = _int(1, -100, 100)
+        # раньше единицей были герцы: 1 Гц от 44100 = 0.002%, метод фактически не работал
+        self.sp_resamp = _dbl(0.3, -2.0, 2.0, 0.05, 2)
+        self.sp_resamp.setToolTip(
+            "Сдвиг скорости в процентах (меняет и темп, и высоту разом).\n"
+            "Рабочий диапазон 0.1–1.0%: замер на chromaprint — сходство отпечатка\n"
+            "0.92 при 0.1% и 0.74 при 1.0% при изменении тембра всего 0.07–0.14 дБ.")
         self.cb_drift_variable = QCheckBox("Переменный drift (вибрато 0.08 Гц)")
         self.cb_drift_variable.setToolTip("Медленное вибрато ±0.2% — ломает временну́ю привязку fingerprint-ориентиров")
         g.layout().addWidget(self.cb_resamp)
-        g.layout().addWidget(_row(QLabel("Дрейф (Гц):"), self.sp_resamp, None))
+        g.layout().addWidget(_row(QLabel("Дрейф (%):"), self.sp_resamp, None))
         g.layout().addWidget(self.cb_drift_variable)
         lay.addWidget(g)
 
@@ -885,7 +894,8 @@ class SpectralTab(QWidget):
         self.cb_dc.setChecked(d.get("dc_shift", False))
         self.sp_dc.setValue(d.get("dc_shift_value", 0.000005))
         self.cb_resamp.setChecked(d.get("resample_drift", False))
-        self.sp_resamp.setValue(int(d.get("resample_drift_amount", 1)))
+        # старые пресеты хранили герцы; спинбокс сам зажмёт значение в ±2%
+        self.sp_resamp.setValue(float(d.get("resample_drift_amount", 0.3)))
         self.cb_drift_variable.setChecked(d.get("drift_variable", False))
         self.cb_micro_pitch.setChecked(d.get("micro_pitch", False))
         self.sp_micro_pitch.setValue(d.get("micro_pitch_cents", 4.0))
@@ -979,13 +989,15 @@ class TextureTab(QWidget):
         self.sp_sj_count = _int(5, 1, 50)
         self.sp_sj_att = _dbl(15.0, 1.0, 40.0, 0.5, 1)
         self.cb_sj_adaptive = QCheckBox("Адаптивные частоты (пики спектра трека)")
-        self.cb_sj_adaptive.setToolTip("Анализирует спектр и атакует именно fingerprint-ориентиры")
+        self.cb_sj_adaptive.setToolTip(
+            "Целится в самые громкие пики спектра.\n"
+            "Замер на chromaprint: самое разрушительное для звука — тембр меняется\n"
+            "на 7.2 дБ (против 0.1 дБ у микро-детюна), а отпечаток ломает не сильнее,\n"
+            "чем rubberband tempo 1.02. Для обхода без потерь лучше «Fingerprint jitter».")
         self.cb_sj_temporal = QCheckBox("Временна́я модуляция (±1.5 dB, 0.15 Гц)")
         self.cb_sj_temporal.setToolTip("Нотчи медленно «дышат» — ломает поиск по стабильным паттернам")
         self.cb_sj_boost = QCheckBox("Компенсирующий буст (+0.5 dB на F×1.5)")
         self.cb_sj_boost.setToolTip("Микроподъём рядом с каждым нотчем — сохраняет спектральный баланс")
-        self.cb_sj_noise = QCheckBox("Субпороговый шум (~−67 dBFS)")
-        self.cb_sj_noise.setToolTip("Неслышимый шум нарушает fingerprint без изменения звука")
         g.layout().addWidget(self.cb_spec_jitter)
         g.layout().addWidget(_row(QLabel("Режим:"), self.cmb_sj_mode))
         g.layout().addWidget(_row(QLabel("Кол-во нотчей:"), self.sp_sj_count, None))
@@ -993,7 +1005,6 @@ class TextureTab(QWidget):
         g.layout().addWidget(self.cb_sj_adaptive)
         g.layout().addWidget(self.cb_sj_temporal)
         g.layout().addWidget(self.cb_sj_boost)
-        g.layout().addWidget(self.cb_sj_noise)
 
         self._sj_constructor = QWidget()
         sj_lay = QVBoxLayout(self._sj_constructor)
@@ -1066,6 +1077,76 @@ class TextureTab(QWidget):
         self.cmb_sj_mode.currentIndexChanged.connect(self._on_sj_mode)
         self.sp_sj_count.valueChanged.connect(self._on_sj_count_changed)
         self._apply_sj_preset([(630, 3.0, 1.5), (3150, 4.0, 1.5)])
+        lay.addWidget(g)
+
+        g = _grp("Fingerprint jitter (обход отпечатка без потерь качества)")
+        self.cb_fp_jitter = QCheckBox("Включить")
+        self.cb_fp_jitter.setToolTip(
+            "Сдвигает временну́ю базу трека и добавляет плотный мелкий EQ.\n"
+            "Замер на chromaprint: ломает отпечаток сильнее глубоких нотчей,\n"
+            "а тембр меняет на 0.1–0.7 дБ вместо 4.3 дБ (порог различения ≈0.5 дБ).\n"
+            "Побочный эффект: реальная длительность меняется на те же проценты.")
+        self.cmb_fpj_mode = QComboBox()
+        self.cmb_fpj_mode.addItems(["Случайно (детюн или темп)", "Микро-детюн", "Темп (rubberband)"])
+        self.cmb_fpj_mode.setToolTip(
+            "Микро-детюн — чистая передискретизация, артефактов нет, но высота\n"
+            "уезжает на 5–17 центов. Темп — rubberband сохраняет высоту, но слегка\n"
+            "размывает транзиенты.")
+        self.sp_fpj_detune = _dbl(0.6, 0.1, 1.5, 0.05, 2)
+        self.sp_fpj_detune.setToolTip("Максимальный сдвиг в %. Реальное значение — 40–100% от него, знак случайный")
+        self.sp_fpj_tempo = _dbl(3.0, 0.5, 6.0, 0.1, 1)
+        self.sp_fpj_tempo.setToolTip("Максимальное изменение темпа в %. Реальное значение — 40–100% от него")
+        self.sp_fpj_bands = _int(20, 8, 40)
+        self.sp_fpj_depth = _dbl(1.5, 0.5, 4.0, 0.1, 1)
+        self.cb_fpj_mod = QCheckBox("Медленная модуляция усиления полос")
+        self.cb_fpj_mod.setToolTip("Каждая полоса «дышит» со своей скоростью — отпечаток расходится и во времени")
+        self.sp_fpj_mod_rate = _dbl(0.10, 0.02, 0.50, 0.01, 2)
+        g.layout().addWidget(self.cb_fp_jitter)
+
+        # Значения подобраны по замерам bench_fingerprint.py (chromaprint):
+        # бит.сх. — сходство отпечатка (ниже = сильнее сломан), ΔLTAS — слышимость
+        _FPJ_PRESETS = [
+            ("Невидимка",
+             "детюн 1.0%: бит.сх. 0.74, ΔLTAS 0.43 дБ — ниже порога различия тембра",
+             {"mode": "detune", "detune": 1.0, "tempo": 3.0,
+              "bands": 20, "depth": 1.0, "mod": True, "mod_rate": 0.08}),
+            ("Баланс",
+             "случайно детюн 0.6% / темп 3%: бит.сх. 0.74–0.77, ΔLTAS ~0.5 дБ",
+             {"mode": "random", "detune": 0.6, "tempo": 3.0,
+              "bands": 20, "depth": 1.5, "mod": True, "mod_rate": 0.10}),
+            ("Сильный",
+             "темп 4% + EQ 24×±2 дБ: сходство отпечатка ниже при умеренных артефактах",
+             {"mode": "tempo", "detune": 0.6, "tempo": 4.0,
+              "bands": 24, "depth": 2.0, "mod": True, "mod_rate": 0.12}),
+            ("Максимум",
+             "темп 5%: бит.сх. 0.67 — самый сильный слом; rubberband слегка размывает транзиенты",
+             {"mode": "tempo", "detune": 0.6, "tempo": 5.0,
+              "bands": 32, "depth": 3.0, "mod": True, "mod_rate": 0.15}),
+        ]
+        fpj_pr_row = QWidget()
+        fpj_pr_lay = QHBoxLayout(fpj_pr_row)
+        fpj_pr_lay.setContentsMargins(0, 0, 0, 0)
+        fpj_pr_lay.setSpacing(3)
+        fpj_pr_lay.addWidget(QLabel("Пресет:"))
+        for _pname, _phint, _pdata in _FPJ_PRESETS:
+            _btn_p = QPushButton(_pname)
+            _btn_p.setFixedHeight(22)
+            _btn_p.setStyleSheet("font-size:9px;padding:0 4px;")
+            _btn_p.setToolTip(_phint)
+            _btn_p.clicked.connect(
+                lambda checked=False, d=_pdata: self._apply_fpj_preset(d)
+            )
+            fpj_pr_lay.addWidget(_btn_p)
+        fpj_pr_lay.addStretch()
+        g.layout().addWidget(fpj_pr_row)
+
+        g.layout().addWidget(_row(QLabel("Сдвиг базы:"), self.cmb_fpj_mode))
+        g.layout().addWidget(_row(QLabel("Детюн (%):"), self.sp_fpj_detune, None))
+        g.layout().addWidget(_row(QLabel("Темп (%):"), self.sp_fpj_tempo, None))
+        g.layout().addWidget(_row(QLabel("Полос EQ:"), self.sp_fpj_bands, None))
+        g.layout().addWidget(_row(QLabel("Глубина (dB):"), self.sp_fpj_depth, None))
+        g.layout().addWidget(self.cb_fpj_mod)
+        g.layout().addWidget(_row(QLabel("Скорость мод. (Гц):"), self.sp_fpj_mod_rate, None))
         lay.addWidget(g)
 
         g = _grp("VK Инфразвук")
@@ -1183,6 +1264,16 @@ class TextureTab(QWidget):
         self.cmb_sj_mode.setCurrentIndex(1)
         self._sync_sj_count()
 
+    def _apply_fpj_preset(self, p: dict):
+        self.cb_fp_jitter.setChecked(True)
+        self.cmb_fpj_mode.setCurrentIndex(_FPJ_MODES.index(p["mode"]))
+        self.sp_fpj_detune.setValue(p["detune"])
+        self.sp_fpj_tempo.setValue(p["tempo"])
+        self.sp_fpj_bands.setValue(p["bands"])
+        self.sp_fpj_depth.setValue(p["depth"])
+        self.cb_fpj_mod.setChecked(p["mod"])
+        self.sp_fpj_mod_rate.setValue(p["mod_rate"])
+
     def get_values(self) -> dict:
         mode = self.cmb_sj_mode.currentIndex()
         if mode == 1:
@@ -1230,7 +1321,14 @@ class TextureTab(QWidget):
             "sj_adaptive": self.cb_sj_adaptive.isChecked(),
             "sj_temporal": self.cb_sj_temporal.isChecked(),
             "sj_boost": self.cb_sj_boost.isChecked(),
-            "sj_noise": self.cb_sj_noise.isChecked(),
+            "fp_jitter": self.cb_fp_jitter.isChecked(),
+            "fp_jitter_time_mode": _FPJ_MODES[self.cmb_fpj_mode.currentIndex()],
+            "fp_jitter_detune_pct": self.sp_fpj_detune.value(),
+            "fp_jitter_tempo_pct": self.sp_fpj_tempo.value(),
+            "fp_jitter_bands": self.sp_fpj_bands.value(),
+            "fp_jitter_depth": self.sp_fpj_depth.value(),
+            "fp_jitter_mod": self.cb_fpj_mod.isChecked(),
+            "fp_jitter_mod_rate": self.sp_fpj_mod_rate.value(),
             "_sj_rows": [
                 {"freq": r["freq"].value(), "att": r["att"].value(), "width": r["width"].value()}
                 for r in self._sj_rows
@@ -1282,7 +1380,15 @@ class TextureTab(QWidget):
         self.cb_sj_adaptive.setChecked(d.get("sj_adaptive", False))
         self.cb_sj_temporal.setChecked(d.get("sj_temporal", False))
         self.cb_sj_boost.setChecked(d.get("sj_boost", False))
-        self.cb_sj_noise.setChecked(d.get("sj_noise", False))
+        self.cb_fp_jitter.setChecked(d.get("fp_jitter", False))
+        _mode = d.get("fp_jitter_time_mode", "random")
+        self.cmb_fpj_mode.setCurrentIndex(_FPJ_MODES.index(_mode) if _mode in _FPJ_MODES else 0)
+        self.sp_fpj_detune.setValue(float(d.get("fp_jitter_detune_pct", 0.6)))
+        self.sp_fpj_tempo.setValue(float(d.get("fp_jitter_tempo_pct", 3.0)))
+        self.sp_fpj_bands.setValue(int(d.get("fp_jitter_bands", 20)))
+        self.sp_fpj_depth.setValue(float(d.get("fp_jitter_depth", 1.5)))
+        self.cb_fpj_mod.setChecked(d.get("fp_jitter_mod", True))
+        self.sp_fpj_mod_rate.setValue(float(d.get("fp_jitter_mod_rate", 0.1)))
         rows_data = d.get("_sj_rows", [])
         for r in rows_data:
             self._add_sj_row(r.get("freq", 1000), r.get("att", 15), r.get("width", 2))
@@ -1394,7 +1500,13 @@ class AdvancedTab(QWidget):
             "Очень большая", "Очень маленькая", "Случайная", "Максимум",
             "Пользовательская", "Нулевая", "Переполнение (overflow)"
         ])
-        self.sp_broken_custom_h = _int(1, 0, 24)
+        self.cmb_broken.setToolTip(
+            "«Очень большая» — 6…24 ч, «Случайная» — 1…24 ч, «Максимум» и\n"
+            "«Переполнение» — ровно 24 ч, «Пользовательская» — не меньше 1 ч.\n"
+            "Обход VK ломается при длительности меньше часа, поэтому\n"
+            "«Очень маленькая» и «Нулевая» намеренно остаются вне этого правила."
+        )
+        self.sp_broken_custom_h = _int(1, 1, 24)
         self.sp_broken_custom_m = _int(0, 0, 59)
         self.sp_broken_custom_s = _int(0, 0, 59)
         self._broken_custom_row = _row(
@@ -1532,6 +1644,11 @@ class TechnicalTab(QWidget):
         g = _grp("Битрейт и кодирование")
         self.cb_bitrate_j = QCheckBox("Джиттер битрейта (случайный из 192/224/256/320)")
         self.cb_frame_sh = QCheckBox("Удалить Xing/Info заголовок")
+        self.cb_frame_sh.setToolTip(
+            "Конфликтует со «Сломанной длительностью»: без Xing/Info подделать\n"
+            "длительность нельзя, поэтому при включённой сломанной длительности\n"
+            "заголовок НЕ удаляется (в лог пишется предупреждение)."
+        )
         g.layout().addWidget(self.cb_bitrate_j)
         g.layout().addWidget(self.cb_frame_sh)
         lay.addWidget(g)
@@ -2393,6 +2510,7 @@ class ModifierPanel(QWidget):
                 "saturation":          t["saturation"],
                 "temporal_jitter":     t["temporal_jitter"],
                 "spectral_jitter":     t["spectral_jitter"],
+                "fp_jitter":           t["fp_jitter"],
                 "vk_infrasonic":       t["vk_infrasonic"],
                 "trim_silence":        a["trim_silence"],
                 "cut_fragment":        a["cut_fragment"],
@@ -2440,6 +2558,16 @@ class ModifierPanel(QWidget):
             "spectral_jitter_fixed_attenuation": t["spectral_jitter_fixed_attenuation"],
             "spectral_jitter_manual_config":     t["spectral_jitter_manual_config"],
             "_sj_rows":                          t["_sj_rows"],
+            "sj_adaptive":                 t["sj_adaptive"],
+            "sj_temporal":                 t["sj_temporal"],
+            "sj_boost":                    t["sj_boost"],
+            "fp_jitter_time_mode":         t["fp_jitter_time_mode"],
+            "fp_jitter_detune_pct":        t["fp_jitter_detune_pct"],
+            "fp_jitter_tempo_pct":         t["fp_jitter_tempo_pct"],
+            "fp_jitter_bands":             t["fp_jitter_bands"],
+            "fp_jitter_depth":             t["fp_jitter_depth"],
+            "fp_jitter_mod":               t["fp_jitter_mod"],
+            "fp_jitter_mod_rate":          t["fp_jitter_mod_rate"],
             "vk_infrasonic_mode":          t["vk_infrasonic_mode"],
             "vk_infrasonic_freq":          t["vk_infrasonic_freq"],
             "vk_infrasonic_amplitude":     t["vk_infrasonic_amplitude"],
